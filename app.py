@@ -213,7 +213,7 @@ def normalize_columns(df):
     prop_zip_col = find_first_existing_column(df, [
         "PropertyPostalCode", "Property Zip", "PropertyZip", "property_zip", "SiteZip", "SitusZip"
     ])
-       price_col = find_first_existing_column(df, [
+    price_col = find_first_existing_column(df, [
         "LastSalesPrice",
         "MLS_Curr_ListPrice", "MLS_Curr_SalePrice",
         "MLS_Prev_ListPrice", "MLS_Prev_SalePrice",
