@@ -210,7 +210,7 @@ def normalize_columns(df):
         "RecipientPostalCode", "MailingZip", "Mailing Zip", "OwnerZip", "Owner Zip"
     ])
 
-       dnc_col = find_first_existing_column(df, [
+    dnc_col = find_first_existing_column(df, [
         "DNC", "DoNotCall", "Do Not Call", "PhoneStatus", "Phone Status", "Compliance",
         "Contact1Phone_1_DNC", "Contact1Phone1DNC", "Contact1 Phone 1 DNC",
         "Contact1Phone_2_DNC", "Contact1Phone2DNC", "Contact1 Phone 2 DNC",
