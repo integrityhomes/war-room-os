@@ -152,7 +152,11 @@ def normalize_columns(df):
 
     phone_col = find_first_existing_column(df, [
         "phone", "Phone", "PhoneNumber", "Phone Number", "Mobile", "MobilePhone",
-        "RecipientPhone", "OwnerPhone", "PrimaryPhone", "phone1"
+        "RecipientPhone", "OwnerPhone", "PrimaryPhone", "phone1",
+        "Contact1Phone_1", "Contact1Phone1", "Contact1 Phone 1",
+        "Contact1Phone_2", "Contact1Phone2", "Contact1 Phone 2",
+        "Contact2Phone_1", "Contact2Phone1", "Contact2 Phone 1",
+        "ContactPhone", "Contact Phone"
     ])
 
     email_col = find_first_existing_column(df, [
@@ -206,10 +210,12 @@ def normalize_columns(df):
         "RecipientPostalCode", "MailingZip", "Mailing Zip", "OwnerZip", "Owner Zip"
     ])
 
-    dnc_col = find_first_existing_column(df, [
-        "DNC", "DoNotCall", "Do Not Call", "PhoneStatus", "Phone Status", "Compliance"
+       dnc_col = find_first_existing_column(df, [
+        "DNC", "DoNotCall", "Do Not Call", "PhoneStatus", "Phone Status", "Compliance",
+        "Contact1Phone_1_DNC", "Contact1Phone1DNC", "Contact1 Phone 1 DNC",
+        "Contact1Phone_2_DNC", "Contact1Phone2DNC", "Contact1 Phone 2 DNC",
+        "Contact2Phone_1_DNC", "Contact2Phone1DNC", "Contact2 Phone 1 DNC"
     ])
-
     # Seller name
     if name_col:
         df["seller_name"] = df[name_col].fillna("").astype(str)
@@ -419,7 +425,18 @@ def score_reply_lead(row):
 # =========================
 
 def raw_dnc_detected(row):
+    # Detect DNC from either column names like Contact1Phone_1_DNC
+    # or values like TRUE, checked, yes, do not call, dnc, etc.
+    for col in row.index:
+        col_lower = clean_text(col).lower()
+        val = clean_text(row.get(col, "")).lower()
+
+        if "dnc" in col_lower or "do_not_call" in col_lower or "donotcall" in col_lower:
+            if val in ["true", "yes", "1", "checked", "x"]:
+                return True
+
     text = " ".join([clean_text(row.get(c, "")) for c in row.index]).lower()
+
     dnc_phrases = [
         "do not call",
         "donotcall",
@@ -428,6 +445,7 @@ def raw_dnc_detected(row):
         "litigator",
         "blacklist"
     ]
+
     return any(phrase in text for phrase in dnc_phrases)
 
 
