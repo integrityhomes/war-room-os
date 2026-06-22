@@ -731,7 +731,8 @@ df = normalize_columns(df)
 file_mode = detect_file_mode(df)
 
 st.success(f"Detected file type: {file_mode}")
-
+with st.expander("Show CSV column names"):
+    st.write(list(df.columns))
 st.write("### Raw Uploaded Data")
 st.dataframe(df.head(25), use_container_width=True)
 
