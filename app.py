@@ -22,8 +22,11 @@ MODULE_TITLE = "Seller Lead Command"
 
 DEFAULT_TIMEZONE = "America/Chicago"
 
-HOT_THRESHOLD = 80
-WARM_THRESHOLD = 50
+HOT_REPLY_THRESHOLD = 80
+WARM_REPLY_THRESHOLD = 50
+
+RAW_PRIORITY_THRESHOLD = 70
+RAW_READY_THRESHOLD = 40
 
 ZAPIER_WEBHOOK_URL = st.secrets.get("ZAPIER_WEBHOOK_URL", "")
 
@@ -31,6 +34,12 @@ ZAPIER_WEBHOOK_URL = st.secrets.get("ZAPIER_WEBHOOK_URL", "")
 # =========================
 # BASIC HELPERS
 # =========================
+
+def clean_text(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
 
 def clean_phone(phone):
     if pd.isna(phone):
@@ -41,8 +50,23 @@ def clean_phone(phone):
     return digits
 
 
+def combine_address(address="", city="", state="", postal=""):
+    parts = [clean_text(address), clean_text(city), clean_text(state), clean_text(postal)]
+    return ", ".join([p for p in parts if p and p.lower() != "none"])
+
+
+def is_company_name(name):
+    name = clean_text(name).lower()
+    company_words = [
+        "llc", "inc", "corp", "company", "properties", "holdings",
+        "investment", "investments", "trust", "estate", "group",
+        "homes", "realty", "management", "capital", "partners"
+    ]
+    return any(word in name for word in company_words)
+
+
 def detect_opt_out(message):
-    message = str(message).lower()
+    message = clean_text(message).lower()
     opt_out_phrases = [
         "stop",
         "remove me",
@@ -58,7 +82,7 @@ def detect_opt_out(message):
 
 
 def detect_wrong_number(message):
-    message = str(message).lower()
+    message = clean_text(message).lower()
     wrong_number_phrases = [
         "wrong number",
         "not my house",
@@ -72,7 +96,7 @@ def detect_wrong_number(message):
 
 
 def detect_call_permission(message):
-    message = str(message).lower()
+    message = clean_text(message).lower()
     call_phrases = [
         "call me",
         "give me a call",
@@ -96,62 +120,166 @@ def inside_calling_hours(timezone_name):
     return 8 <= now.hour < 21
 
 
-def normalize_columns(df):
-    rename_map = {}
-
-    possible_columns = {
-        "seller_name": ["seller", "name", "owner", "owner_name", "full_name", "seller_name"],
-        "phone": ["phone", "phone_number", "mobile", "number"],
-        "email": ["email", "email_address"],
-        "property_address": ["property", "address", "property_address", "site_address"],
-        "seller_message": ["message", "reply", "seller_reply", "last_message", "sms", "body", "seller_message"],
-        "campaign_name": ["campaign", "campaign_name", "list_name"],
-        "source": ["source"],
-        "seller_timezone": ["timezone", "seller_timezone", "time_zone"]
-    }
-
+def find_first_existing_column(df, options):
     lower_cols = {c.lower().strip(): c for c in df.columns}
+    for option in options:
+        key = option.lower().strip()
+        if key in lower_cols:
+            return lower_cols[key]
+    return None
 
-    for standard, options in possible_columns.items():
-        for option in options:
-            if option in lower_cols:
-                rename_map[lower_cols[option]] = standard
-                break
 
-    df = df.rename(columns=rename_map)
+def value_from_options(row, options):
+    for option in options:
+        if option in row.index:
+            val = clean_text(row.get(option, ""))
+            if val and val.lower() != "none":
+                return val
+    return ""
 
-    required_columns = [
-        "seller_name",
-        "phone",
-        "email",
-        "property_address",
-        "seller_message",
-        "campaign_name",
-        "source",
-        "seller_timezone"
-    ]
 
-    for col in required_columns:
-        if col not in df.columns:
-            df[col] = ""
+# =========================
+# COLUMN NORMALIZATION
+# =========================
 
-    df["source"] = df["source"].replace("", "XLeads").fillna("XLeads")
-    df["seller_timezone"] = df["seller_timezone"].replace("", DEFAULT_TIMEZONE).fillna(DEFAULT_TIMEZONE)
+def normalize_columns(df):
+    df = df.copy()
+
+    # Keep original columns but add our standard columns too.
+    first_col = find_first_existing_column(df, ["FirstName", "First Name", "first_name", "seller_first_name"])
+    last_col = find_first_existing_column(df, ["LastName", "Last Name", "last_name", "seller_last_name"])
+    name_col = find_first_existing_column(df, ["seller_name", "Name", "Owner", "OwnerName", "FullName", "Full Name"])
+
+    phone_col = find_first_existing_column(df, [
+        "phone", "Phone", "PhoneNumber", "Phone Number", "Mobile", "MobilePhone",
+        "RecipientPhone", "OwnerPhone", "PrimaryPhone", "phone1"
+    ])
+
+    email_col = find_first_existing_column(df, [
+        "email", "Email", "EmailAddress", "Email Address", "RecipientEmail", "OwnerEmail"
+    ])
+
+    message_col = find_first_existing_column(df, [
+        "seller_message", "message", "reply", "seller_reply", "last_message",
+        "sms", "body", "Text", "Conversation"
+    ])
+
+    campaign_col = find_first_existing_column(df, [
+        "campaign_name", "campaign", "Campaign", "ListName", "List Name", "SourceList"
+    ])
+
+    source_col = find_first_existing_column(df, ["source", "Source"])
+
+    timezone_col = find_first_existing_column(df, [
+        "seller_timezone", "timezone", "time_zone", "TimeZone"
+    ])
+
+    prop_addr_col = find_first_existing_column(df, [
+        "PropertyAddress", "Property Address", "property_address", "SiteAddress", "SitusAddress"
+    ])
+
+    prop_city_col = find_first_existing_column(df, [
+        "PropertyCity", "Property City", "property_city", "SiteCity", "SitusCity"
+    ])
+
+    prop_state_col = find_first_existing_column(df, [
+        "PropertyState", "Property State", "property_state", "SiteState", "SitusState"
+    ])
+
+    prop_zip_col = find_first_existing_column(df, [
+        "PropertyPostalCode", "Property Zip", "PropertyZip", "property_zip", "SiteZip", "SitusZip"
+    ])
+
+    mail_addr_col = find_first_existing_column(df, [
+        "RecipientAddress", "MailingAddress", "Mailing Address", "OwnerAddress", "Owner Address"
+    ])
+
+    mail_city_col = find_first_existing_column(df, [
+        "RecipientCity", "MailingCity", "Mailing City", "OwnerCity", "Owner City"
+    ])
+
+    mail_state_col = find_first_existing_column(df, [
+        "RecipientState", "MailingState", "Mailing State", "OwnerState", "Owner State"
+    ])
+
+    mail_zip_col = find_first_existing_column(df, [
+        "RecipientPostalCode", "MailingZip", "Mailing Zip", "OwnerZip", "Owner Zip"
+    ])
+
+    dnc_col = find_first_existing_column(df, [
+        "DNC", "DoNotCall", "Do Not Call", "PhoneStatus", "Phone Status", "Compliance"
+    ])
+
+    # Seller name
+    if name_col:
+        df["seller_name"] = df[name_col].fillna("").astype(str)
+    else:
+        first = df[first_col].fillna("").astype(str) if first_col else ""
+        last = df[last_col].fillna("").astype(str) if last_col else ""
+        df["seller_name"] = (first + " " + last).str.strip() if first_col or last_col else ""
+
+    # Standard fields
+    df["phone"] = df[phone_col].fillna("").astype(str) if phone_col else ""
+    df["email"] = df[email_col].fillna("").astype(str) if email_col else ""
+    df["seller_message"] = df[message_col].fillna("").astype(str) if message_col else ""
+    df["campaign_name"] = df[campaign_col].fillna("").astype(str) if campaign_col else "XLeads Export"
+    df["source"] = df[source_col].fillna("").astype(str) if source_col else "XLeads"
+    df["seller_timezone"] = df[timezone_col].fillna("").astype(str) if timezone_col else DEFAULT_TIMEZONE
+
+    df["property_street"] = df[prop_addr_col].fillna("").astype(str) if prop_addr_col else ""
+    df["property_city"] = df[prop_city_col].fillna("").astype(str) if prop_city_col else ""
+    df["property_state"] = df[prop_state_col].fillna("").astype(str) if prop_state_col else ""
+    df["property_zip"] = df[prop_zip_col].fillna("").astype(str) if prop_zip_col else ""
+
+    df["mailing_street"] = df[mail_addr_col].fillna("").astype(str) if mail_addr_col else ""
+    df["mailing_city"] = df[mail_city_col].fillna("").astype(str) if mail_city_col else ""
+    df["mailing_state"] = df[mail_state_col].fillna("").astype(str) if mail_state_col else ""
+    df["mailing_zip"] = df[mail_zip_col].fillna("").astype(str) if mail_zip_col else ""
+
+    df["property_address"] = df.apply(
+        lambda row: combine_address(
+            row.get("property_street", ""),
+            row.get("property_city", ""),
+            row.get("property_state", ""),
+            row.get("property_zip", "")
+        ),
+        axis=1
+    )
+
+    df["mailing_address"] = df.apply(
+        lambda row: combine_address(
+            row.get("mailing_street", ""),
+            row.get("mailing_city", ""),
+            row.get("mailing_state", ""),
+            row.get("mailing_zip", "")
+        ),
+        axis=1
+    )
+
+    df["dnc_raw"] = df[dnc_col].fillna("").astype(str) if dnc_col else ""
 
     return df
 
 
+def detect_file_mode(df):
+    message_count = df["seller_message"].astype(str).str.strip().replace("nan", "").ne("").sum()
+    if message_count > 0:
+        return "Seller Replies"
+    return "Raw XLeads Property List"
+
+
 # =========================
-# LEAD SCORING BOT
+# SELLER REPLY SCORING
 # =========================
 
-def score_lead(row):
-    message = str(row.get("seller_message", "")).lower()
+def score_reply_lead(row):
+    message = clean_text(row.get("seller_message", "")).lower()
 
     if detect_opt_out(message):
         return {
             "lead_status": "DNC / Opt-Out",
             "lead_score": 0,
+            "lead_lane": "Blocked",
             "motivation": "Seller opted out or asked not to be contacted.",
             "recommended_next_step": "Stop all contact immediately.",
             "recommended_next_question": "",
@@ -164,6 +292,7 @@ def score_lead(row):
         return {
             "lead_status": "Wrong Number",
             "lead_score": 0,
+            "lead_lane": "Blocked",
             "motivation": "Wrong number or seller says they do not own the property.",
             "recommended_next_step": "Mark as wrong number. Do not continue.",
             "recommended_next_question": "",
@@ -240,23 +369,27 @@ def score_lead(row):
 
     score = min(score, 100)
 
-    if score >= HOT_THRESHOLD:
+    if score >= HOT_REPLY_THRESHOLD:
         status = "Hot A Lead"
+        lane = "Hot Replies"
         tag = "XLEADS_HOT_SELLER"
         workflow = "Hot Seller Immediate Call"
         next_step = "Push to REI BlackBook and create immediate call task."
-    elif score >= WARM_THRESHOLD:
+    elif score >= WARM_REPLY_THRESHOLD:
         status = "Warm B Lead"
+        lane = "Follow-Up Queue"
         tag = "XLEADS_WARM_SELLER"
         workflow = "Warm Seller Follow Up"
         next_step = "Keep qualifying. Ask one question at a time."
     elif score > 0:
         status = "Nurture C Lead"
+        lane = "Follow-Up Queue"
         tag = "XLEADS_NURTURE"
         workflow = "Long Term Nurture"
         next_step = "Add to follow-up queue."
     else:
         status = "Needs Review"
+        lane = "Review"
         tag = "XLEADS_AI_REVIEWED"
         workflow = "Needs Review"
         next_step = "Needs human review."
@@ -271,6 +404,7 @@ def score_lead(row):
     return {
         "lead_status": status,
         "lead_score": score,
+        "lead_lane": lane,
         "motivation": ", ".join(reasons) if reasons else "Not clear yet.",
         "recommended_next_step": next_step,
         "recommended_next_question": next_question,
@@ -280,11 +414,147 @@ def score_lead(row):
     }
 
 
-def score_dataframe(df):
+# =========================
+# RAW XLEADS LIST SCORING
+# =========================
+
+def raw_dnc_detected(row):
+    text = " ".join([clean_text(row.get(c, "")) for c in row.index]).lower()
+    dnc_phrases = [
+        "do not call",
+        "donotcall",
+        "dnc",
+        "do-not-call",
+        "litigator",
+        "blacklist"
+    ]
+    return any(phrase in text for phrase in dnc_phrases)
+
+
+def score_raw_xleads_lead(row):
+    score = 0
+    reasons = []
+
+    seller_name = clean_text(row.get("seller_name", ""))
+    property_address = clean_text(row.get("property_address", ""))
+    mailing_address = clean_text(row.get("mailing_address", ""))
+
+    prop_city = clean_text(row.get("property_city", "")).lower()
+    prop_state = clean_text(row.get("property_state", "")).lower()
+    prop_zip = clean_text(row.get("property_zip", ""))
+
+    mail_city = clean_text(row.get("mailing_city", "")).lower()
+    mail_state = clean_text(row.get("mailing_state", "")).lower()
+    mail_zip = clean_text(row.get("mailing_zip", ""))
+
+    phone = clean_phone(row.get("phone", ""))
+    email = clean_text(row.get("email", ""))
+
+    if raw_dnc_detected(row):
+        return {
+            "lead_status": "Possible DNC / Call Block",
+            "lead_score": 0,
+            "lead_lane": "Blocked",
+            "motivation": "XLeads export contains possible DNC / do-not-call language.",
+            "recommended_next_step": "Do not call. Review before any text/email.",
+            "recommended_next_question": "",
+            "rei_blackbook_tag": "XLEADS_DNC_REVIEW",
+            "rei_blackbook_workflow": "Compliance Review",
+            "call_permission": "No"
+        }
+
+    if property_address:
+        score += 15
+        reasons.append("property address present")
+
+    if phone:
+        score += 20
+        reasons.append("phone present")
+    else:
+        reasons.append("no phone found in export")
+
+    if email:
+        score += 5
+        reasons.append("email present")
+
+    if seller_name:
+        score += 10
+        reasons.append("owner name present")
+
+    if is_company_name(seller_name):
+        score += 15
+        reasons.append("company/LLC owner")
+
+    absentee = False
+
+    if mailing_address and property_address:
+        if mail_zip and prop_zip and mail_zip != prop_zip:
+            absentee = True
+        elif mail_city and prop_city and mail_city != prop_city:
+            absentee = True
+        elif mail_state and prop_state and mail_state != prop_state:
+            absentee = True
+
+    if absentee:
+        score += 25
+        reasons.append("absentee owner")
+
+    if mail_state and prop_state and mail_state != prop_state:
+        score += 15
+        reasons.append("out-of-state owner")
+
+    if seller_name.lower() in ["none", "unknown", ""]:
+        score -= 10
+        reasons.append("missing owner name")
+
+    score = max(0, min(score, 100))
+
+    if not phone:
+        status = "Needs Phone / Skip Trace"
+        lane = "Needs Data"
+        tag = "XLEADS_NEEDS_SKIPTRACE"
+        workflow = "Needs Skip Trace"
+        next_step = "Do not call yet. Needs phone or better contact data."
+    elif score >= RAW_PRIORITY_THRESHOLD:
+        status = "Priority Text Lead"
+        lane = "Raw Lead Prioritizer"
+        tag = "XLEADS_PRIORITY_RAW_LEAD"
+        workflow = "Ready For Text Campaign"
+        next_step = "Good lead to send into XLeads text/email campaign."
+    elif score >= RAW_READY_THRESHOLD:
+        status = "Ready for Text Campaign"
+        lane = "Raw Lead Prioritizer"
+        tag = "XLEADS_READY_FOR_TEXT"
+        workflow = "Ready For Text Campaign"
+        next_step = "Okay to include in campaign after compliance review."
+    else:
+        status = "Property Lead Review"
+        lane = "Review"
+        tag = "XLEADS_PROPERTY_REVIEW"
+        workflow = "Property Lead Review"
+        next_step = "Review before marketing."
+
+    return {
+        "lead_status": status,
+        "lead_score": score,
+        "lead_lane": lane,
+        "motivation": ", ".join(reasons) if reasons else "Raw property lead.",
+        "recommended_next_step": next_step,
+        "recommended_next_question": "",
+        "rei_blackbook_tag": tag,
+        "rei_blackbook_workflow": workflow,
+        "call_permission": "No"
+    }
+
+
+def score_dataframe(df, file_mode):
     scored_rows = []
 
     for _, row in df.iterrows():
-        result = score_lead(row)
+        if file_mode == "Seller Replies":
+            result = score_reply_lead(row)
+        else:
+            result = score_raw_xleads_lead(row)
         scored_rows.append(result)
 
     scored_df = pd.concat(
@@ -299,6 +569,7 @@ def score_dataframe(df):
     scored_df["inside_calling_hours"] = scored_df["seller_timezone"].apply(inside_calling_hours)
 
     scored_df["ai_call_allowed"] = (
+        (file_mode == "Seller Replies") &
         (scored_df["call_permission"] == "Yes") &
         (scored_df["opt_out_detected"] == False) &
         (scored_df["wrong_number_detected"] == False) &
@@ -306,6 +577,7 @@ def score_dataframe(df):
     )
 
     scored_df["human_call_task_allowed"] = (
+        (file_mode == "Seller Replies") &
         (scored_df["lead_status"].isin(["Hot A Lead", "Warm B Lead"])) &
         (scored_df["opt_out_detected"] == False) &
         (scored_df["wrong_number_detected"] == False) &
@@ -315,10 +587,12 @@ def score_dataframe(df):
     scored_df["summary_note"] = scored_df.apply(
         lambda row: (
             f"War Room OS Lead Summary | "
+            f"Mode: {file_mode} | "
             f"Status: {row['lead_status']} | "
             f"Score: {row['lead_score']} | "
-            f"Motivation: {row['motivation']} | "
-            f"Seller Message: {row['seller_message']}"
+            f"Reason: {row['motivation']} | "
+            f"Property: {row.get('property_address', '')} | "
+            f"Seller Message: {row.get('seller_message', '')}"
         ),
         axis=1
     )
@@ -339,11 +613,13 @@ def send_to_zapier(row):
         "phone": row.get("clean_phone", row.get("phone", "")),
         "email": row.get("email", ""),
         "property_address": row.get("property_address", ""),
+        "mailing_address": row.get("mailing_address", ""),
         "campaign_name": row.get("campaign_name", ""),
         "source": row.get("source", "XLeads"),
         "seller_message": row.get("seller_message", ""),
         "lead_status": row.get("lead_status", ""),
         "lead_score": int(row.get("lead_score", 0)),
+        "lead_lane": row.get("lead_lane", ""),
         "motivation": row.get("motivation", ""),
         "call_permission": row.get("call_permission", ""),
         "ai_call_allowed": str(row.get("ai_call_allowed", False)),
@@ -371,19 +647,26 @@ st.title(APP_TITLE)
 st.subheader(MODULE_TITLE)
 
 st.write(
-    "This module sorts XLeads replies, finds hot sellers, builds a follow-up queue, "
-    "checks call compliance, and prepares hot leads for REI BlackBook."
+    "This module handles both raw XLeads property exports and seller reply files. "
+    "Raw lists are prioritized for campaigns. Seller replies are sorted into hot leads, follow-up, and compliance queues."
 )
 
 st.divider()
 
-with st.expander("CSV columns to use"):
+with st.expander("CSV file types this app can read"):
+    st.write("**Raw XLeads Property List columns:**")
     st.code(
-        "seller_name,phone,email,property_address,seller_message,campaign_name,source,seller_timezone",
+        "FirstName, LastName, RecipientAddress, RecipientCity, RecipientState, RecipientPostalCode, PropertyAddress, PropertyCity, PropertyState, PropertyPostalCode",
         language="text"
     )
 
-uploaded_file = st.file_uploader("Upload XLeads replies CSV", type=["csv"])
+    st.write("**Seller Reply columns:**")
+    st.code(
+        "seller_name, phone, email, property_address, seller_message, campaign_name, source, seller_timezone",
+        language="text"
+    )
+
+uploaded_file = st.file_uploader("Upload XLeads CSV", type=["csv"])
 
 if uploaded_file is None:
     st.warning("Upload a CSV to begin.")
@@ -391,57 +674,90 @@ if uploaded_file is None:
 
 df = pd.read_csv(uploaded_file)
 df = normalize_columns(df)
+file_mode = detect_file_mode(df)
 
-st.write("### Raw XLeads Replies")
-st.dataframe(df, use_container_width=True)
+st.success(f"Detected file type: {file_mode}")
+
+st.write("### Raw Uploaded Data")
+st.dataframe(df.head(25), use_container_width=True)
 
 if st.button("Score Leads With War Room OS", type="primary"):
-    st.session_state["scored_df"] = score_dataframe(df)
+    st.session_state["scored_df"] = score_dataframe(df, file_mode)
+    st.session_state["file_mode"] = file_mode
 
 if "scored_df" not in st.session_state:
     st.stop()
 
 scored_df = st.session_state["scored_df"]
+file_mode = st.session_state["file_mode"]
 
 total = len(scored_df)
-hot = len(scored_df[scored_df["lead_status"] == "Hot A Lead"])
-warm = len(scored_df[scored_df["lead_status"] == "Warm B Lead"])
-nurture = len(scored_df[scored_df["lead_status"] == "Nurture C Lead"])
-blocked = len(scored_df[scored_df["lead_status"].isin(["DNC / Opt-Out", "Wrong Number"])])
-ai_allowed = len(scored_df[scored_df["ai_call_allowed"] == True])
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Total Leads", total)
-col2.metric("Hot Leads", hot)
-col3.metric("Warm Leads", warm)
-col4.metric("Blocked", blocked)
-col5.metric("AI Calls Allowed", ai_allowed)
+if file_mode == "Seller Replies":
+    hot = len(scored_df[scored_df["lead_status"] == "Hot A Lead"])
+    warm = len(scored_df[scored_df["lead_status"] == "Warm B Lead"])
+    blocked = len(scored_df[scored_df["lead_status"].isin(["DNC / Opt-Out", "Wrong Number"])])
+    ai_allowed = len(scored_df[scored_df["ai_call_allowed"] == True])
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total Replies", total)
+    col2.metric("Hot Leads", hot)
+    col3.metric("Warm Leads", warm)
+    col4.metric("Blocked", blocked)
+    col5.metric("AI Calls Allowed", ai_allowed)
+
+else:
+    priority = len(scored_df[scored_df["lead_status"] == "Priority Text Lead"])
+    ready = len(scored_df[scored_df["lead_status"] == "Ready for Text Campaign"])
+    needs_data = len(scored_df[scored_df["lead_status"] == "Needs Phone / Skip Trace"])
+    blocked = len(scored_df[scored_df["lead_status"] == "Possible DNC / Call Block"])
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total Raw Leads", total)
+    col2.metric("Priority Text Leads", priority)
+    col3.metric("Ready for Campaign", ready)
+    col4.metric("Needs Data", needs_data)
+    col5.metric("Blocked Review", blocked)
 
 tabs = st.tabs([
-    "Hot Leads",
-    "Follow-Up Queue",
+    "Priority Leads",
+    "Follow-Up / Review",
     "Compliance Call Manager",
     "All Scored Leads",
     "REI BlackBook Push"
 ])
 
 with tabs[0]:
-    st.write("### Hot Leads")
-    hot_df = scored_df[scored_df["lead_status"] == "Hot A Lead"].sort_values("lead_score", ascending=False)
-    st.dataframe(hot_df, use_container_width=True)
+    if file_mode == "Seller Replies":
+        st.write("### Hot Seller Replies")
+        view_df = scored_df[scored_df["lead_status"] == "Hot A Lead"].sort_values("lead_score", ascending=False)
+    else:
+        st.write("### Priority Raw XLeads Leads")
+        view_df = scored_df[
+            scored_df["lead_status"].isin(["Priority Text Lead", "Ready for Text Campaign"])
+        ].sort_values("lead_score", ascending=False)
+
+    st.dataframe(view_df, use_container_width=True)
 
 with tabs[1]:
-    st.write("### Follow-Up Queue")
-    follow_df = scored_df[
-        scored_df["lead_status"].isin(["Warm B Lead", "Nurture C Lead", "Needs Review"])
-    ].sort_values("lead_score", ascending=False)
-    st.dataframe(follow_df, use_container_width=True)
+    st.write("### Follow-Up / Review Queue")
+    if file_mode == "Seller Replies":
+        view_df = scored_df[
+            scored_df["lead_status"].isin(["Warm B Lead", "Nurture C Lead", "Needs Review"])
+        ].sort_values("lead_score", ascending=False)
+    else:
+        view_df = scored_df[
+            scored_df["lead_status"].isin(["Needs Phone / Skip Trace", "Property Lead Review"])
+        ].sort_values("lead_score", ascending=False)
+
+    st.dataframe(view_df, use_container_width=True)
 
 with tabs[2]:
     st.write("### Compliance Call Manager")
     st.warning(
-        "AI calls are allowed only when the seller clearly gave call permission, "
-        "did not opt out, is not a wrong number, and it is inside calling hours."
+        "AI calls are only allowed for seller reply files when the seller clearly gave call permission, "
+        "did not opt out, is not a wrong number, and it is inside calling hours. "
+        "Raw XLeads lists should not be AI-called."
     )
 
     compliance_cols = [
@@ -458,7 +774,8 @@ with tabs[2]:
         "human_call_task_allowed"
     ]
 
-    st.dataframe(scored_df[compliance_cols], use_container_width=True)
+    existing_cols = [c for c in compliance_cols if c in scored_df.columns]
+    st.dataframe(scored_df[existing_cols], use_container_width=True)
 
 with tabs[3]:
     st.write("### All Scored Leads")
@@ -473,28 +790,34 @@ with tabs[3]:
     )
 
 with tabs[4]:
-    st.write("### Push Hot Leads to REI BlackBook Through Zapier")
+    st.write("### Push Leads to REI BlackBook Through Zapier")
     st.caption(
-        "This sends hot leads to a Zapier webhook. Zapier will then create/update the contact in REI BlackBook."
+        "For now, only push seller replies or reviewed priority leads. Zapier will create/update the contact in REI BlackBook."
     )
 
-    hot_push_df = scored_df[
-        (scored_df["lead_status"] == "Hot A Lead") &
-        (scored_df["opt_out_detected"] == False) &
-        (scored_df["wrong_number_detected"] == False)
-    ].copy()
+    if file_mode == "Seller Replies":
+        push_df = scored_df[
+            (scored_df["lead_status"] == "Hot A Lead") &
+            (scored_df["opt_out_detected"] == False) &
+            (scored_df["wrong_number_detected"] == False)
+        ].copy()
+    else:
+        push_df = scored_df[
+            (scored_df["lead_status"] == "Priority Text Lead")
+        ].copy()
 
-    st.dataframe(hot_push_df, use_container_width=True)
+    st.dataframe(push_df, use_container_width=True)
 
-    if st.button("Send Hot Leads to Zapier / REI BlackBook"):
+    if st.button("Send These Leads to Zapier / REI BlackBook"):
         results = []
 
-        for _, row in hot_push_df.iterrows():
+        for _, row in push_df.iterrows():
             success, message = send_to_zapier(row)
             results.append({
                 "seller_name": row.get("seller_name", ""),
                 "phone": row.get("phone", ""),
                 "property_address": row.get("property_address", ""),
+                "lead_status": row.get("lead_status", ""),
                 "success": success,
                 "message": message
             })
