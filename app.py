@@ -223,7 +223,7 @@ def normalize_columns(df):
         "AssessedValue", "Assessed Value", "AVM", "Value",
         "LastSalePrice", "Last Sale Price", "SalePrice", "Sale Price"
     ])
-    ])
+    
     mail_addr_col = find_first_existing_column(df, [
         "RecipientAddress", "MailingAddress", "Mailing Address", "OwnerAddress", "Owner Address"
     ])
