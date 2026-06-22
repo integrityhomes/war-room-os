@@ -49,6 +49,26 @@ def clean_phone(phone):
         digits = digits[1:]
     return digits
 
+def parse_price(value):
+    if pd.isna(value):
+        return None
+
+    text = str(value).replace("$", "").replace(",", "").strip()
+
+    if text.lower() in ["", "none", "nan", "null"]:
+        return None
+
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def price_in_buy_box(price):
+    if price is None:
+        return False
+   
+    return 5000 <= price <= 75000
 
 def combine_address(address="", city="", state="", postal=""):
     parts = [clean_text(address), clean_text(city), clean_text(state), clean_text(postal)]
@@ -193,7 +213,13 @@ def normalize_columns(df):
     prop_zip_col = find_first_existing_column(df, [
         "PropertyPostalCode", "Property Zip", "PropertyZip", "property_zip", "SiteZip", "SitusZip"
     ])
-
+    price_col = find_first_existing_column(df, [
+        "Price", "price", "ListPrice", "List Price", "AskingPrice", "Asking Price",
+        "EstimatedValue", "Estimated Value", "EstValue", "Est Value",
+        "PropertyValue", "Property Value", "MarketValue", "Market Value",
+        "AssessedValue", "Assessed Value", "AVM", "Value",
+        "LastSalePrice", "Last Sale Price", "SalePrice", "Sale Price"
+    ])
     mail_addr_col = find_first_existing_column(df, [
         "RecipientAddress", "MailingAddress", "Mailing Address", "OwnerAddress", "Owner Address"
     ])
@@ -236,7 +262,7 @@ def normalize_columns(df):
     df["property_city"] = df[prop_city_col].fillna("").astype(str) if prop_city_col else ""
     df["property_state"] = df[prop_state_col].fillna("").astype(str) if prop_state_col else ""
     df["property_zip"] = df[prop_zip_col].fillna("").astype(str) if prop_zip_col else ""
-
+    df["property_price"] = df[price_col].apply(parse_price) if price_col else None
     df["mailing_street"] = df[mail_addr_col].fillna("").astype(str) if mail_addr_col else ""
     df["mailing_city"] = df[mail_city_col].fillna("").astype(str) if mail_city_col else ""
     df["mailing_state"] = df[mail_state_col].fillna("").astype(str) if mail_state_col else ""
@@ -467,7 +493,7 @@ def score_raw_xleads_lead(row):
 
     phone = clean_phone(row.get("phone", ""))
     email = clean_text(row.get("email", ""))
-
+    property_price = row.get("property_price", None)
     if raw_dnc_detected(row):
         return {
             "lead_status": "Possible DNC / Call Block",
@@ -484,7 +510,17 @@ def score_raw_xleads_lead(row):
     if property_address:
         score += 15
         reasons.append("property address present")
-
+    if price_in_buy_box(property_price):
+        score += 30
+        reasons.append("price/value inside $5k-$75k buy box")
+    elif property_price is None:
+        reasons.append("no price/value found")
+    elif property_price < 5000:
+        score -= 10
+        reasons.append("price/value under $5k - review")
+    elif property_price > 75000:
+        score -= 20
+        reasons.append("price/value over $75k buy box")
     if phone:
         score += 20
         reasons.append("phone present")
