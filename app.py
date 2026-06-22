@@ -786,7 +786,7 @@ tabs = st.tabs([
     "REI BlackBook Push",
     "Ready for Campaign"
 ])
-])
+
 
 with tabs[5]:
     ready_df = scored_df[scored_df["lead_status"] == "Ready for Campaign"].copy()
