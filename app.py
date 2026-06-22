@@ -213,12 +213,16 @@ def normalize_columns(df):
     prop_zip_col = find_first_existing_column(df, [
         "PropertyPostalCode", "Property Zip", "PropertyZip", "property_zip", "SiteZip", "SitusZip"
     ])
-    price_col = find_first_existing_column(df, [
+       price_col = find_first_existing_column(df, [
+        "LastSalesPrice",
+        "MLS_Curr_ListPrice", "MLS_Curr_SalePrice",
+        "MLS_Prev_ListPrice", "MLS_Prev_SalePrice",
         "Price", "price", "ListPrice", "List Price", "AskingPrice", "Asking Price",
         "EstimatedValue", "Estimated Value", "EstValue", "Est Value",
         "PropertyValue", "Property Value", "MarketValue", "Market Value",
         "AssessedValue", "Assessed Value", "AVM", "Value",
         "LastSalePrice", "Last Sale Price", "SalePrice", "Sale Price"
+    ])
     ])
     mail_addr_col = find_first_existing_column(df, [
         "RecipientAddress", "MailingAddress", "Mailing Address", "OwnerAddress", "Owner Address"
