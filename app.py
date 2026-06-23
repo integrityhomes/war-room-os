@@ -797,10 +797,12 @@ with tabs[5]:
     st.dataframe(ready_df, use_container_width=True)
 
     st.download_button(
-        label="Download Ready for Campaign CSV",
-        data=ready_df.to_csv(index=False).encode("utf-8"),
-        file_name="war_room_ready_for_campaign.csv",
-        mime="text/csv"
+    label="Download Ready for Campaign CSV",
+    data=ready_df.to_csv(index=False).encode("utf-8"),
+    file_name="war_room_ready_for_campaign.csv",
+    mime="text/csv",
+    key="download_ready_for_campaign_csv"
+)
     )
 
 with tabs[0]:
