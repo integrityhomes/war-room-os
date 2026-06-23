@@ -803,7 +803,7 @@ with tabs[5]:
     mime="text/csv",
     key="download_ready_for_campaign_csv"
 )
-    )
+    
 
 with tabs[0]:
     if file_mode == "Seller Replies":
