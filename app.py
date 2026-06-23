@@ -788,10 +788,9 @@ tabs = st.tabs([
 ])
 
 
-with tabs[5]:
-    ready_df = scored_df[
-        scored_df["lead_status"].astype(str).str.strip().str.lower() == "ready for campaign"
-    ].copy()
+ready_df = scored_df[
+    scored_df["lead_status"].astype(str).str.contains("Ready", case=False, na=False)
+].copy()
 
     st.write("### Ready for Campaign Leads")
     st.write("These are the cleanest raw XLeads leads to send into the next XLeads text/email campaign.")
