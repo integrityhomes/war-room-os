@@ -789,20 +789,23 @@ tabs = st.tabs([
 
 
 with tabs[5]:
-    ready_df = scored_df[scored_df["lead_status"] == "Ready for Campaign"].copy()
+    ready_df = scored_df[
+        scored_df["lead_status"].astype(str).str.strip().str.lower() == "ready for campaign"
+    ].copy()
 
     st.write("### Ready for Campaign Leads")
     st.write("These are the cleanest raw XLeads leads to send into the next XLeads text/email campaign.")
+    st.write(f"Ready rows found: {len(ready_df)}")
 
     st.dataframe(ready_df, use_container_width=True)
 
     st.download_button(
-    label="Download Ready for Campaign CSV",
-    data=ready_df.to_csv(index=False).encode("utf-8"),
-    file_name="war_room_ready_for_campaign.csv",
-    mime="text/csv",
-    key="download_ready_for_campaign_csv"
-)
+        label="Download Ready for Campaign CSV",
+        data=ready_df.to_csv(index=False).encode("utf-8"),
+        file_name="war_room_ready_for_campaign.csv",
+        mime="text/csv",
+        key="download_ready_campaign_csv_v2"
+    )
     
 
 with tabs[0]:
