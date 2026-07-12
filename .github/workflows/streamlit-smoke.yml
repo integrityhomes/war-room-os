@@ -1,0 +1,41 @@
+name: Streamlit Smoke Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Compile app
+        run: python -m py_compile app.py lead_intelligence.py xleads_adapter.py xleads_adapter_v2.py lead_intelligence/__init__.py
+      - name: Start Streamlit and verify health
+        run: |
+          streamlit run app.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
+          APP_PID=$!
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health; then
+              kill $APP_PID || true
+              cat streamlit.log
+              exit 0
+            fi
+            if ! kill -0 $APP_PID 2>/dev/null; then
+              cat streamlit.log
+              exit 1
+            fi
+            sleep 2
+          done
+          cat streamlit.log
+          kill $APP_PID || true
+          exit 1
