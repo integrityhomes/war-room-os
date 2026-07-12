@@ -1,4 +1,4 @@
-"""Hotfix wrapper that guarantees unique output columns for Streamlit/Arrow."""
+"""Stable wrapper that guarantees unique output columns for Streamlit."""
 from __future__ import annotations
 
 from typing import Sequence
@@ -23,37 +23,41 @@ def _is_blank(series: pd.Series) -> pd.Series:
 
 
 def ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse duplicate column names, preferring the newest nonblank value.
+    """Collapse duplicate names without repeatedly inserting columns.
 
-    XLeads exports already contain normalized fields such as phone/email. The
-    scoring result can also generate those fields. Pandas allows duplicate names,
-    but Streamlit/pyarrow does not. This function merges duplicate-name columns
-    row by row and returns a DataFrame with guaranteed unique column names.
+    The previous implementation inserted one column at a time, producing a highly
+    fragmented DataFrame. On Streamlit Community Cloud that path eventually caused
+    the Python process to segfault. This version builds all Series first and performs
+    one concat operation.
     """
     if df.columns.is_unique:
-        return df.copy()
+        return df.copy(deep=False)
 
-    output = pd.DataFrame(index=df.index)
+    series_list: list[pd.Series] = []
     seen: set[str] = set()
+
     for column in df.columns:
         name = str(column)
         if name in seen:
             continue
         seen.add(name)
+
         matches = df.loc[:, df.columns == column]
         if matches.shape[1] == 1:
-            output[name] = matches.iloc[:, 0]
-            continue
+            merged = matches.iloc[:, 0].copy()
+        else:
+            merged = matches.iloc[:, -1].copy()
+            for position in range(matches.shape[1] - 2, -1, -1):
+                earlier = matches.iloc[:, position]
+                merged = merged.where(~_is_blank(merged), earlier)
 
-        merged = matches.iloc[:, -1].copy()
-        for position in range(matches.shape[1] - 2, -1, -1):
-            earlier = matches.iloc[:, position]
-            merged = merged.where(~_is_blank(merged), earlier)
-        output[name] = merged
+        merged.name = name
+        series_list.append(merged)
 
+    output = pd.concat(series_list, axis=1, copy=False)
     if not output.columns.is_unique:
         raise ValueError("Unable to create unique output columns")
-    return output
+    return output.copy()
 
 
 def score_dataframe(
