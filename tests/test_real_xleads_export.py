@@ -1,6 +1,12 @@
 import pandas as pd
 
-from lead_intelligence import score_dataframe, score_raw_lead, select_contact, signal
+from lead_intelligence import (
+    ensure_unique_columns,
+    score_dataframe,
+    score_raw_lead,
+    select_contact,
+    signal,
+)
 
 
 def test_zero_value_signal_does_not_score_as_true():
@@ -53,19 +59,31 @@ def test_unknown_dnc_is_review_not_campaign_ready():
     assert "DNC_STATUS_UNKNOWN" in result["risk_flags"]
 
 
-def test_dataframe_uses_selected_safe_phone():
+def test_dataframe_uses_selected_safe_phone_and_unique_columns():
     df = pd.DataFrame([{
         "PropertyAddress": "1 Main St",
         "PropertyState": "VA",
         "property_address": "1 Main St, Richmond, VA",
         "property_state": "VA",
+        "phone": "5401111111",
+        "email": "old@example.com",
         "Contact1Phone_1": "5401111111",
         "Contact1Phone_1_DNC": "true",
         "Contact1Phone_2": "5402222222",
         "Contact1Phone_2_DNC": "false",
+        "Contact1Email_2": "safe@example.com",
         "Vacancy": "1",
         "Foreclosures": "0",
     }])
     scored = score_dataframe(df, "Raw XLeads Property List", ["VA"])
+    assert scored.columns.is_unique
     assert scored.iloc[0]["phone"] == "5402222222"
+    assert scored.iloc[0]["email"] == "safe@example.com"
     assert "foreclosure record" not in scored.iloc[0]["motivation"]
+
+
+def test_unique_column_hotfix_prefers_latest_nonblank_value():
+    duplicate_df = pd.DataFrame([["old", "new"], ["keep", ""]], columns=["phone", "phone"])
+    fixed = ensure_unique_columns(duplicate_df)
+    assert fixed.columns.tolist() == ["phone"]
+    assert fixed["phone"].tolist() == ["new", "keep"]
