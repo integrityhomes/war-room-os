@@ -20,4 +20,17 @@ jobs:
       - name: Compile application
         run: python -m py_compile app.py lead_intelligence.py xleads_adapter.py lead_intelligence/__init__.py
       - name: Run tests
-        run: pytest -vv --tb=short
+        id: pytest
+        continue-on-error: true
+        run: |
+          pytest -vv --tb=short > test-results.txt 2>&1
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-test-results
+          path: test-results.txt
+      - name: Fail if tests failed
+        if: steps.pytest.outputs.exit_code != '0'
+        run: exit 1
