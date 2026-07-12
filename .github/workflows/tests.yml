@@ -16,11 +16,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest
+        run: pip install -q -r requirements.txt pytest
       - name: Compile application
         run: python -m py_compile app.py lead_intelligence.py xleads_adapter.py lead_intelligence/__init__.py
       - name: Run tests
-        run: pytest -q
+        run: pytest -vv --tb=short
