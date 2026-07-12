@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -28,6 +28,7 @@ def get_secret(name: str, default: str = "") -> str:
 
 
 ZAPIER_WEBHOOK_URL = get_secret("ZAPIER_WEBHOOK_URL")
+SKIPTRACE_WEBHOOK_URL = get_secret("SKIPTRACE_WEBHOOK_URL", ZAPIER_WEBHOOK_URL)
 
 
 def find_column(df: pd.DataFrame, options: list[str]) -> str | None:
@@ -123,6 +124,29 @@ def display_columns(df: pd.DataFrame, extra: list[str] | None = None) -> list[st
     return [column for column in preferred if column in df.columns]
 
 
+def safe_payload_value(value):
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    return value
+
+
+def send_to_webhook(url: str, payload: dict) -> tuple[bool, str]:
+    if not url:
+        return False, "No webhook URL is saved in Streamlit secrets."
+    try:
+        response = requests.post(url, json=payload, timeout=30)
+        if response.status_code in {200, 201, 202}:
+            return True, "Sent successfully."
+        return False, f"Webhook returned {response.status_code}: {response.text[:250]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
 def send_to_zapier(row: pd.Series) -> tuple[bool, str]:
     if not ZAPIER_WEBHOOK_URL:
         return False, "No ZAPIER_WEBHOOK_URL is saved in Streamlit secrets."
@@ -135,15 +159,54 @@ def send_to_zapier(row: pd.Series) -> tuple[bool, str]:
         "reason_codes", "asking_price_extracted", "timeline_bucket", "xleads_action",
         "rei_blackbook_tag", "rei_blackbook_tags", "rei_blackbook_workflow", "summary_note",
     ]
-    payload = {field: row.get(field, "") for field in fields}
+    payload = {field: safe_payload_value(row.get(field, "")) for field in fields}
     payload["phone"] = row.get("clean_phone", row.get("phone", ""))
-    try:
-        response = requests.post(ZAPIER_WEBHOOK_URL, json=payload, timeout=20)
-        if response.status_code in {200, 201, 202}:
-            return True, "Sent successfully."
-        return False, f"Zapier returned {response.status_code}: {response.text[:250]}"
-    except Exception as exc:
-        return False, str(exc)
+    payload["automation_action"] = "PUSH_ACTIVE_OPPORTUNITY"
+    payload["source_system"] = "War Room OS"
+    payload["requested_at_utc"] = datetime.now(timezone.utc).isoformat()
+    return send_to_webhook(ZAPIER_WEBHOOK_URL, payload)
+
+
+def build_skiptrace_queue(scored_df: pd.DataFrame) -> pd.DataFrame:
+    skiptrace = scored_df[
+        scored_df["xleads_action"].astype(str).eq("SKIP_TRACE")
+        & scored_df["duplicate_primary"].astype(bool)
+    ].copy()
+    if skiptrace.empty:
+        return skiptrace
+    skiptrace["skiptrace_status"] = "QUEUED_FOR_SKIPTRACE"
+    skiptrace["skiptrace_requested_at_utc"] = datetime.now(timezone.utc).isoformat()
+    skiptrace["skiptrace_priority"] = skiptrace["lead_score"].rank(method="dense", ascending=False).astype(int)
+    skiptrace["skiptrace_reason"] = skiptrace.apply(
+        lambda row: " | ".join(
+            part for part in [
+                clean_text(row.get("lead_status", "")),
+                clean_text(row.get("missing_information", "")),
+                clean_text(row.get("risk_flags", "")),
+                clean_text(row.get("motivation", "")),
+            ] if part
+        ),
+        axis=1,
+    )
+    return skiptrace.sort_values(["lead_score", "confidence"], ascending=[False, False]).reset_index(drop=True)
+
+
+def send_skiptrace_to_webhook(row: pd.Series) -> tuple[bool, str]:
+    if not SKIPTRACE_WEBHOOK_URL:
+        return False, "No SKIPTRACE_WEBHOOK_URL or ZAPIER_WEBHOOK_URL is saved in Streamlit secrets."
+    payload = {column: safe_payload_value(row.get(column, "")) for column in row.index}
+    payload.update({
+        "automation_action": "RUN_SKIP_TRACE",
+        "source_system": "War Room OS",
+        "requested_at_utc": datetime.now(timezone.utc).isoformat(),
+        "handoff_rule": "Skiptrace only. Do not text or call until returned phones are reviewed and approved.",
+        "required_return_fields": [
+            "seller_name", "property_address", "mailing_address", "phone_1", "phone_2", "phone_3",
+            "phone_type", "phone_confidence", "email_1", "email_2", "skiptrace_source", "skiptrace_date",
+            "dnc_flag", "no_phone_found", "next_xleads_action",
+        ],
+    })
+    return send_to_webhook(SKIPTRACE_WEBHOOK_URL, payload)
 
 
 def feedback_template(scored_df: pd.DataFrame) -> pd.DataFrame:
@@ -175,6 +238,10 @@ with st.sidebar:
     target_states = [item.strip().upper() for item in target_states_text.split(",") if item.strip()]
     st.caption("Raw lists outside these states are held for review. Seller replies are still analyzed so a live opportunity is never silently discarded.")
     st.info("AI voice calls require clear seller call permission. Human call tasks remain visible after hours but should be completed in the proper calling window.")
+    if SKIPTRACE_WEBHOOK_URL:
+        st.success("Skip Trace Queue webhook is configured.")
+    else:
+        st.warning("Skip Trace Queue webhook is not configured yet. Add SKIPTRACE_WEBHOOK_URL or ZAPIER_WEBHOOK_URL in Streamlit secrets.")
 
 with st.expander("CSV fields this version understands"):
     st.write("It accepts raw XLeads exports, seller SMS replies, AI voice transcripts, call summaries, dispositions, motivation, timeline, condition, occupancy, and price fields. Column names are normalized automatically.")
@@ -234,17 +301,19 @@ else:
         total,
         int((scored_df["lead_status"] == "Priority Campaign Lead").sum()),
         int((scored_df["lead_status"] == "Ready for Campaign").sum()),
-        int(scored_df["lead_status"].isin(["Needs Phone / Skip Trace", "Needs Property Data"]).sum()),
+        int((scored_df["lead_status"] == "Needs Phone / Skip Trace").sum()),
+        int((scored_df["lead_status"] == "Needs Property Data").sum()),
         int(scored_df["human_review_required"].astype(bool).sum()),
     ]
-    labels = ["Total Raw Leads", "Priority Campaign", "Ready for Campaign", "Needs Data", "Review"]
-    for col, label, value in zip(st.columns(5), labels, values):
+    labels = ["Total Raw Leads", "Priority Campaign", "Ready for Campaign", "Skip Trace", "Needs Property Data", "Review"]
+    for col, label, value in zip(st.columns(6), labels, values):
         col.metric(label, value)
 
 
 tabs = st.tabs([
     "Must Call Queue", "Missed-Opportunity Watch", "Follow-Up", "Compliance",
-    "Raw Campaign Queue", "All Scored Leads", "Greatness Test", "Learning Loop", "Push / Export",
+    "Skip Trace Queue", "Raw Campaign Queue", "All Scored Leads", "Greatness Test",
+    "Learning Loop", "Push / Export",
 ])
 
 with tabs[0]:
@@ -286,6 +355,48 @@ with tabs[3]:
     st.dataframe(scored_df[columns], use_container_width=True, hide_index=True)
 
 with tabs[4]:
+    st.write("### Skip Trace Queue")
+    st.caption("This is the one-click queue for records the intelligence layer marked `SKIP_TRACE`. It does not text or call these leads; it only prepares or sends the skiptrace handoff.")
+    skiptrace_queue = build_skiptrace_queue(scored_df)
+    st.metric("Leads waiting for skiptrace", len(skiptrace_queue))
+    if skiptrace_queue.empty:
+        st.success("No leads need skiptrace in this upload.")
+    else:
+        priority_cols = [column for column in [
+            "skiptrace_priority", "lead_score", "seller_name", "property_address", "mailing_address",
+            "email", "lead_status", "missing_information", "risk_flags", "skiptrace_reason", "xleads_action",
+        ] if column in skiptrace_queue.columns]
+        st.dataframe(skiptrace_queue[priority_cols], use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download Clean Skip Trace Queue CSV",
+            skiptrace_queue.to_csv(index=False).encode("utf-8"),
+            "war_room_skiptrace_queue.csv",
+            "text/csv",
+            key="download_skiptrace_queue",
+        )
+        st.warning("Only click the send button after your webhook is connected to XLeads or your skiptrace provider. This will not auto-call or auto-text anyone.")
+        if st.button("Send Skip Trace Queue to Webhook", type="primary"):
+            results = []
+            for _, row in skiptrace_queue.iterrows():
+                success, message = send_skiptrace_to_webhook(row)
+                results.append({
+                    "seller_name": row.get("seller_name", ""),
+                    "property_address": row.get("property_address", ""),
+                    "lead_score": row.get("lead_score", ""),
+                    "success": success,
+                    "message": message,
+                })
+            result_df = pd.DataFrame(results)
+            st.dataframe(result_df, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Skip Trace Send Audit Log",
+                result_df.to_csv(index=False).encode("utf-8"),
+                "war_room_skiptrace_audit_log.csv",
+                "text/csv",
+                key="download_skiptrace_audit_log",
+            )
+
+with tabs[5]:
     st.write("### Raw Campaign Queue")
     if file_mode == "Raw XLeads Property List":
         campaign = scored_df[scored_df["lead_status"].isin(["Priority Campaign Lead", "Ready for Campaign"]) & scored_df["duplicate_primary"].astype(bool)].copy()
@@ -294,12 +405,12 @@ with tabs[4]:
     else:
         st.info("This upload contains seller engagement, so the call and follow-up queues are the correct views.")
 
-with tabs[5]:
+with tabs[6]:
     st.write("### All Scored Leads")
     st.dataframe(scored_df, use_container_width=True, hide_index=True)
     st.download_button("Download All Scored Leads", scored_df.to_csv(index=False).encode("utf-8"), "war_room_all_scored_leads.csv", "text/csv", key="download_all")
 
-with tabs[6]:
+with tabs[7]:
     st.write("### Built-In Greatness Test")
     test_df = run_greatness_test()
     passed = int(test_df["passed"].sum())
@@ -313,13 +424,13 @@ with tabs[6]:
         st.error("One or more edge cases failed. Do not deploy until corrected.")
     st.dataframe(test_df, use_container_width=True, hide_index=True)
 
-with tabs[7]:
+with tabs[8]:
     st.write("### Closed-Deal Learning Loop")
     st.caption("This is how the engine becomes specific to your company. Your team records what actually happened, and future versions can recalibrate weights against signed contracts and revenue.")
     template = feedback_template(scored_df)
     st.download_button("Download Team Outcome Feedback Sheet", template.to_csv(index=False).encode("utf-8"), "war_room_outcome_feedback.csv", "text/csv", key="download_feedback")
 
-with tabs[8]:
+with tabs[9]:
     st.write("### Push Active Opportunities Through Zapier")
     st.caption("Must-call, follow-up, and human-review records are included. Compliance blocks, clear rejections, and suppressed duplicates are excluded.")
     active = scored_df[
