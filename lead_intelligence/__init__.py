@@ -22,16 +22,20 @@ for _name in dir(_BASE):
     if not _name.startswith("_"):
         globals()[_name] = getattr(_BASE, _name)
 
-# Import after the original surface is available. xleads_adapter imports
-# lead_intelligence as its seller-reply base, which now resolves to this package.
-from xleads_adapter import (  # noqa: E402,F401
-    DEFAULT_TARGET_STATES,
-    clean_text,
-    run_greatness_test,
-    score_dataframe,
-    score_raw_lead,
-    score_reply_lead,
-    select_contact,
-    signal,
-    truthy,
-)
+# Import the adapter only after the original surface is available. Then bind
+# the adapter's base reference directly to the loaded legacy module so seller
+# reply scoring delegates to the original function instead of recursing back
+# into the adapter after this package overlays score_dataframe.
+import xleads_adapter as _ADAPTER  # noqa: E402
+
+_ADAPTER.base = _BASE
+
+DEFAULT_TARGET_STATES = _ADAPTER.DEFAULT_TARGET_STATES
+clean_text = _ADAPTER.clean_text
+run_greatness_test = _ADAPTER.run_greatness_test
+score_dataframe = _ADAPTER.score_dataframe
+score_raw_lead = _ADAPTER.score_raw_lead
+score_reply_lead = _ADAPTER.score_reply_lead
+select_contact = _ADAPTER.select_contact
+signal = _ADAPTER.signal
+truthy = _ADAPTER.truthy
