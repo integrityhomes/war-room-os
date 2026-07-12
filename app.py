@@ -18,7 +18,7 @@ st.set_page_config(page_title="War Room OS", page_icon="🏠", layout="wide")
 APP_TITLE = "War Room OS"
 MODULE_TITLE = "Seller Lead Command — Intelligence Layer"
 DEFAULT_TIMEZONE = "America/Chicago"
-PREVIEW_LIMIT = 250
+PREVIEW_LIMIT = 100
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -55,19 +55,29 @@ def combine_address(street: str, city: str, state: str, postal: str) -> str:
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+
     first = series_from(df, ["FirstName", "First Name", "first_name", "seller_first_name"])
     last = series_from(df, ["LastName", "Last Name", "last_name", "seller_last_name"])
-    full_name = series_from(df, ["seller_name", "Name", "Owner", "OwnerName", "FullName", "Full Name"])
+    full_name = series_from(df, ["seller_name", "Seller Name", "Name", "Owner", "OwnerName", "Owner Name", "FullName", "Full Name"])
     df["seller_name"] = full_name.where(full_name.str.strip().ne(""), (first + " " + last).str.strip())
 
+    # XLeads/Leadpipes exports often return phone_1/phone_2 or Phone 1/Phone 2. Count any of them as a usable phone.
     df["phone"] = series_from(df, [
         "phone", "Phone", "PhoneNumber", "Phone Number", "Mobile", "MobilePhone",
-        "RecipientPhone", "OwnerPhone", "PrimaryPhone", "phone1", "ContactPhone",
-        "Contact1Phone_1", "Contact1Phone1", "Contact1 Phone 1",
+        "RecipientPhone", "OwnerPhone", "PrimaryPhone", "Primary Phone", "phone1", "phone_1", "Phone 1",
+        "phone2", "phone_2", "Phone 2", "phone3", "phone_3", "Phone 3",
+        "ContactPhone", "Contact1Phone_1", "Contact1Phone1", "Contact1 Phone 1",
         "Contact1Phone_2", "Contact1Phone2", "Contact1 Phone 2",
         "Contact2Phone_1", "Contact2Phone1", "Contact2 Phone 1",
     ])
-    df["email"] = series_from(df, ["email", "Email", "EmailAddress", "Email Address", "RecipientEmail", "OwnerEmail"])
+    df["phone_1"] = series_from(df, ["phone_1", "Phone 1", "phone1", "Contact1Phone_1", "Contact1 Phone 1"])
+    df["phone_2"] = series_from(df, ["phone_2", "Phone 2", "phone2", "Contact1Phone_2", "Contact1 Phone 2"])
+    df["phone_3"] = series_from(df, ["phone_3", "Phone 3", "phone3", "Contact2Phone_1", "Contact2 Phone 1"])
+
+    df["email"] = series_from(df, ["email", "Email", "EmailAddress", "Email Address", "RecipientEmail", "OwnerEmail", "email_1", "Email 1"])
+    df["email_1"] = series_from(df, ["email_1", "Email 1", "Email"])
+    df["email_2"] = series_from(df, ["email_2", "Email 2"])
+
     df["seller_message"] = series_from(df, [
         "seller_message", "message", "reply", "seller_reply", "last_message",
         "sms", "body", "Text", "Conversation", "Last Inbound Message",
@@ -134,7 +144,7 @@ def ensure_unique_columns(df: pd.DataFrame) -> pd.DataFrame:
 def display_columns(df: pd.DataFrame, extra: list[str] | None = None) -> list[str]:
     preferred = [
         "call_lane", "call_deadline", "lead_score", "opportunity_score_10", "confidence",
-        "seller_name", "phone", "property_address", "seller_message", "call_summary",
+        "seller_name", "phone", "phone_1", "phone_2", "property_address", "seller_message", "call_summary",
         "timeline_bucket", "asking_price_extracted", "motivation", "missing_information",
         "recommended_next_question", "xleads_action", "rei_blackbook_tags", "risk_flags",
     ]
@@ -149,17 +159,33 @@ def safe_table(df: pd.DataFrame, columns: list[str] | None = None, limit: int = 
         view = view[[c for c in columns if c in view.columns]].copy()
     if len(view) > limit:
         view = view.head(limit).copy()
-    # Keep Streamlit/Arrow stable by avoiding fragmented or mixed object blocks.
     for column in view.columns:
-        if view[column].dtype == "object" or str(view[column].dtype).startswith("string"):
-            view[column] = view[column].fillna("").astype(str)
+        view[column] = view[column].fillna("").astype(str)
     return view.copy()
 
 
 def show_table(df: pd.DataFrame, columns: list[str] | None = None, limit: int = PREVIEW_LIMIT) -> None:
+    """Render tables as lightweight HTML instead of Streamlit's Arrow table to avoid segfaults."""
+    if df.empty:
+        st.caption("No records in this queue.")
+        return
     if len(df) > limit:
         st.caption(f"Showing first {limit} of {len(df)} records. Use the download button for the full file.")
-    st.dataframe(safe_table(df, columns=columns, limit=limit), width="stretch", hide_index=True)
+    view = safe_table(df, columns=columns, limit=limit)
+    html = view.to_html(index=False, escape=True)
+    st.markdown(
+        f"""
+        <div style="max-height:520px; overflow:auto; border:1px solid #ddd; border-radius:6px;">
+        <style>
+        table {{border-collapse: collapse; width: 100%; font-size: 13px;}}
+        th, td {{border: 1px solid #ddd; padding: 6px; text-align: left; vertical-align: top;}}
+        th {{background: #f7f7f7; position: sticky; top: 0; z-index: 1;}}
+        </style>
+        {html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def safe_payload_value(value):
@@ -189,13 +215,13 @@ def send_to_zapier(row: pd.Series) -> tuple[bool, str]:
     if not ZAPIER_WEBHOOK_URL:
         return False, "No ZAPIER_WEBHOOK_URL is saved in Streamlit secrets."
     fields = [
-        "seller_name", "phone", "clean_phone", "email", "property_address", "mailing_address",
-        "campaign_name", "source", "seller_message", "call_transcript", "call_summary",
-        "call_disposition", "lead_status", "lead_score", "opportunity_score_10", "lead_lane",
-        "call_lane", "call_deadline", "must_call", "confidence", "motivation", "score_explanation",
-        "recommended_next_step", "recommended_next_question", "missing_information", "risk_flags",
-        "reason_codes", "asking_price_extracted", "timeline_bucket", "xleads_action",
-        "rei_blackbook_tag", "rei_blackbook_tags", "rei_blackbook_workflow", "summary_note",
+        "seller_name", "phone", "phone_1", "phone_2", "phone_3", "clean_phone", "email", "email_1", "email_2",
+        "property_address", "mailing_address", "campaign_name", "source", "seller_message",
+        "call_transcript", "call_summary", "call_disposition", "lead_status", "lead_score",
+        "opportunity_score_10", "lead_lane", "call_lane", "call_deadline", "must_call", "confidence",
+        "motivation", "score_explanation", "recommended_next_step", "recommended_next_question",
+        "missing_information", "risk_flags", "reason_codes", "asking_price_extracted", "timeline_bucket",
+        "xleads_action", "rei_blackbook_tag", "rei_blackbook_tags", "rei_blackbook_workflow", "summary_note",
     ]
     payload = {field: safe_payload_value(row.get(field, "")) for field in fields}
     payload["phone"] = row.get("clean_phone", row.get("phone", ""))
@@ -287,7 +313,7 @@ with st.expander("CSV fields this version understands"):
 uploaded_file = st.file_uploader("Upload XLeads CSV", type=["csv"])
 if uploaded_file is None:
     st.warning("Upload an XLeads CSV to begin.")
-    with st.expander("Run the built-in greatness test without uploading a file"):
+    if st.button("Run built-in greatness test"):
         test_df = run_greatness_test()
         passed = int(test_df["passed"].sum())
         st.metric("Greatness tests passed", f"{passed}/{len(test_df)}")
@@ -308,13 +334,14 @@ with st.expander("Preview normalized upload"):
     st.write("Detected columns:", list(raw_df.columns))
 
 if st.button("Run Intelligent Lead Ranking", type="primary"):
-    scored = score_dataframe(normalized_df, file_mode, target_states=target_states)
-    scored = ensure_unique_columns(scored)
-    scored["inside_calling_hours"] = scored["seller_timezone"].apply(inside_calling_hours)
-    scored["ai_call_allowed"] = scored["ai_call_allowed"] & scored["inside_calling_hours"]
-    scored["human_call_task_allowed"] = scored["human_call_task_allowed"] & scored["inside_calling_hours"]
-    st.session_state["scored_df"] = scored.copy()
-    st.session_state["file_mode"] = file_mode
+    with st.spinner("Scoring leads..."):
+        scored = score_dataframe(normalized_df, file_mode, target_states=target_states)
+        scored = ensure_unique_columns(scored)
+        scored["inside_calling_hours"] = scored["seller_timezone"].apply(inside_calling_hours)
+        scored["ai_call_allowed"] = scored["ai_call_allowed"] & scored["inside_calling_hours"]
+        scored["human_call_task_allowed"] = scored["human_call_task_allowed"] & scored["inside_calling_hours"]
+        st.session_state["scored_df"] = scored.copy()
+        st.session_state["file_mode"] = file_mode
 
 if "scored_df" not in st.session_state:
     st.stop()
@@ -383,7 +410,7 @@ with tabs[2]:
 with tabs[3]:
     st.write("### Compliance and Call Permissions")
     columns = [column for column in [
-        "seller_name", "phone", "property_address", "seller_message", "call_lane", "call_permission",
+        "seller_name", "phone", "phone_1", "phone_2", "property_address", "seller_message", "call_lane", "call_permission",
         "inside_calling_hours", "ai_call_allowed", "human_call_task_allowed", "opt_out_detected",
         "wrong_number_detected", "duplicate_flag", "duplicate_primary", "risk_flags", "xleads_action",
     ] if column in scored_df.columns]
@@ -399,12 +426,12 @@ with tabs[4]:
     else:
         priority_cols = [column for column in [
             "skiptrace_priority", "lead_score", "seller_name", "property_address", "mailing_address",
-            "email", "lead_status", "missing_information", "risk_flags", "skiptrace_reason", "xleads_action",
+            "phone_1", "phone_2", "email", "lead_status", "missing_information", "risk_flags", "skiptrace_reason", "xleads_action",
         ] if column in skiptrace_queue.columns]
         show_table(skiptrace_queue, priority_cols)
         st.download_button("Download Clean Skip Trace Queue CSV", skiptrace_queue.to_csv(index=False).encode("utf-8"), "war_room_skiptrace_queue.csv", "text/csv", key="download_skiptrace_queue")
         st.warning("Send a small batch first. This avoids Zapier limits and keeps Streamlit stable.")
-        max_records = int(st.number_input("Max skiptrace records to send now", min_value=1, max_value=len(skiptrace_queue), value=min(25, len(skiptrace_queue)), step=1))
+        max_records = int(st.number_input("Max skiptrace records to send now", min_value=1, max_value=len(skiptrace_queue), value=min(5, len(skiptrace_queue)), step=1))
         if st.button("Send Skip Trace Batch to Webhook", type="primary"):
             batch = skiptrace_queue.head(max_records).copy()
             results = []
@@ -434,19 +461,20 @@ with tabs[5]:
 
 with tabs[6]:
     st.write("### All Scored Leads")
-    show_table(scored_df)
+    show_table(scored_df, limit=50)
     st.download_button("Download All Scored Leads", scored_df.to_csv(index=False).encode("utf-8"), "war_room_all_scored_leads.csv", "text/csv", key="download_all")
 
 with tabs[7]:
     st.write("### Built-In Greatness Test")
-    test_df = run_greatness_test()
-    passed = int(test_df["passed"].sum())
-    failed = len(test_df) - passed
-    col1, col2 = st.columns(2)
-    col1.metric("Passed", f"{passed}/{len(test_df)}")
-    col2.metric("Failed", failed)
-    st.success("Every built-in edge-case scenario passed.") if failed == 0 else st.error("One or more edge cases failed. Do not deploy until corrected.")
-    show_table(test_df, limit=100)
+    if st.button("Run Greatness Test", key="greatness_test_tab"):
+        test_df = run_greatness_test()
+        passed = int(test_df["passed"].sum())
+        failed = len(test_df) - passed
+        col1, col2 = st.columns(2)
+        col1.metric("Passed", f"{passed}/{len(test_df)}")
+        col2.metric("Failed", failed)
+        st.success("Every built-in edge-case scenario passed.") if failed == 0 else st.error("One or more edge cases failed. Do not deploy until corrected.")
+        show_table(test_df, limit=100)
 
 with tabs[8]:
     st.write("### Closed-Deal Learning Loop")
@@ -459,7 +487,7 @@ with tabs[9]:
         scored_df["duplicate_primary"].astype(bool)
         & ~scored_df["call_lane"].isin(["Do Not Contact", "Closed / No Call", "Duplicate / Suppress"])
     ].copy()
-    show_table(active, display_columns(active))
+    show_table(active, display_columns(active), limit=50)
     if st.button("Send Active Opportunities to Zapier / REI BlackBook"):
         results = []
         for _, row in active.iterrows():
