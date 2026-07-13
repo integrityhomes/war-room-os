@@ -7,8 +7,11 @@ import pandas as pd
 import requests
 import streamlit as st
 
-
 st.set_page_config(page_title="Automatic Skip Trace", page_icon="🔎", layout="wide")
+
+SHEET_ID = "1c3F6mwJwN-EnCKeTxw16f2EfcEAxh4H6WDQPDVkyPrc"
+SHEET_GID = "0"
+SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit?gid={SHEET_GID}#gid={SHEET_GID}"
 
 
 def clean_text(value) -> str:
@@ -54,9 +57,13 @@ def send_to_webhook(url: str, row: pd.Series) -> tuple[bool, str]:
             "source_system": "War Room OS",
             "requested_at_utc": datetime.now(timezone.utc).isoformat(),
             "handoff_rule": "Skiptrace only. Do not text or call until returned phones are reviewed and approved.",
+            "google_sheet_id": SHEET_ID,
+            "google_sheet_gid": SHEET_GID,
+            "google_sheet_url": SHEET_URL,
             "google_sheet_name": "War Room Skip Trace Queue",
-            "google_sheet_tab": "Skiptrace Requests",
+            "google_sheet_tab": "Sheet1",
             "required_return_fields": [
+                "lead_key",
                 "seller_name",
                 "property_address",
                 "mailing_address",
@@ -88,8 +95,9 @@ st.title("War Room OS")
 st.subheader("Automatic Skip Trace")
 st.write(
     "This page sends every lead marked SKIP_TRACE directly to the existing Zapier webhook. "
-    "Zapier then writes the request and returned contact data to the War Room Skip Trace Queue Google Sheet."
+    "Zapier writes requests and returned contact data into the connected War Room Skip Trace Queue sheet."
 )
+st.caption(f"Connected sheet: {SHEET_ID} | tab: Sheet1")
 
 webhook_url = get_secret("SKIPTRACE_WEBHOOK_URL", get_secret("ZAPIER_WEBHOOK_URL"))
 
@@ -144,9 +152,7 @@ preview_columns = [
 if not unsent.empty:
     st.dataframe(unsent[preview_columns].head(100), use_container_width=True, hide_index=True)
 
-st.caption(
-    "One click sends all unsent records to Zapier. The app remembers what was sent during this session so it does not resend duplicates."
-)
+st.caption("One click sends all unsent records to Zapier and prevents duplicate sends during this session.")
 
 if st.button("Run Automatic Skip Trace", type="primary", disabled=unsent.empty):
     results: list[dict] = []
