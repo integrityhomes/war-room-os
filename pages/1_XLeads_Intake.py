@@ -10,12 +10,12 @@ from xleads_campaign_control import (
     build_report,
     campaign_export,
     email_export,
-    is_returned_leadtrace,
     phone_export,
     prepare_skiptrace_upload,
     read_xleads_upload,
     review_export,
 )
+from xleads_paid_verification import verify_paid_leadtrace
 
 st.set_page_config(page_title="XLeads Skip Trace Control Center", page_icon="📥", layout="wide")
 
@@ -38,9 +38,8 @@ def show_html(df: pd.DataFrame, columns: list[str], limit: int = 100) -> None:
 
 st.title("War Room XLeads Skip Trace Control Center")
 st.caption(
-    "Prepare a property list for XLeads Lead Trace, then upload the returned XLeads CSV or ZIP. "
-    "War Room selects screened phones and valid emails, keeps phone DNC rules separate from email, "
-    "and creates clean XLeads campaign files."
+    "Prepare a property list for paid XLeads LeadTrace, then upload the returned XLeads CSV or ZIP. "
+    "War Room only unlocks campaign queues after it verifies populated phone, DNC, and litigator results."
 )
 
 with st.sidebar:
@@ -48,9 +47,14 @@ with st.sidebar:
     default_tag = f"xleads-{datetime.now().strftime('%Y-%m-%d')}"
     campaign_tag = st.text_input("Campaign tag", value=default_tag)
 
-uploaded = st.file_uploader("Upload a raw property CSV or returned XLeads Lead Trace CSV/ZIP", type=["csv", "zip"])
+uploaded = st.file_uploader(
+    "Upload a raw property CSV or returned paid XLeads LeadTrace CSV/ZIP",
+    type=["csv", "zip"],
+)
 if uploaded is None:
-    st.info("Upload a raw property list to prepare it for Lead Trace, or upload the returned XLeads file to build campaign queues.")
+    st.info(
+        "Upload a raw property list to prepare it for paid LeadTrace, or upload the returned XLeads file to build campaign queues."
+    )
     st.stop()
 
 try:
@@ -60,27 +64,49 @@ except Exception as exc:
     st.stop()
 
 st.success(f"Loaded {len(raw_df):,} rows from {source_filename}")
+verification = verify_paid_leadtrace(raw_df)
 
-if not is_returned_leadtrace(raw_df):
+if not verification.verified:
+    st.error("Paid LeadTrace Not Verified — Skip Trace Still Required")
+    st.write(verification.reason)
+
+    left, right = st.columns(2)
+    left.metric("Paired phone/DNC/litigator groups", verification.paired_phone_groups)
+    right.metric("Rows with completed screening", verification.screened_rows)
+
+    st.warning(
+        "XLeads may show phone numbers or emails on My Leads before paid LeadTrace runs. "
+        "War Room will not treat those contact fields as skip-traced results without populated matching DNC and litigator evidence."
+    )
+
     prepared = prepare_skiptrace_upload(raw_df)
-    st.subheader("Step 1 — Prepare for XLeads Lead Trace")
+    st.subheader("Step 1 — Run Paid XLeads LeadTrace")
     st.write(
-        "This file does not contain returned Lead Trace phone/email fields yet. "
-        "Download the cleaned upload below, run Lead Trace in XLeads, then bring the returned CSV or ZIP back to this page."
+        "Download the cleaned property upload below, run paid LeadTrace in XLeads, then bring the returned CSV or ZIP back to this page."
     )
     st.metric("Properties prepared", len(prepared))
     preview_columns = [
-        "seller_name", "property_address", "mailing_address", "owner_type", "avm", "wholesale_value", "mls_status"
+        "seller_name",
+        "property_address",
+        "mailing_address",
+        "owner_type",
+        "avm",
+        "wholesale_value",
+        "mls_status",
     ]
     show_html(prepared, preview_columns)
     st.download_button(
-        "Download XLeads Lead Trace Upload",
+        "Download XLeads Paid LeadTrace Upload",
         prepared.to_csv(index=False).encode("utf-8"),
-        file_name=f"{campaign_tag}-xleads-leadtrace-upload.csv",
+        file_name=f"{campaign_tag}-xleads-paid-leadtrace-upload.csv",
         mime="text/csv",
         type="primary",
     )
     st.stop()
+
+st.success(
+    f"Paid LeadTrace Verified — {verification.screened_rows:,} rows contain populated phone, DNC, and litigator screening results."
+)
 
 try:
     queue = analyze_returned_export(raw_df, campaign_tag)
@@ -89,7 +115,7 @@ except Exception as exc:
     st.error(f"Could not process the returned XLeads file: {exc}")
     st.stop()
 
-st.subheader("Step 2 — Returned Lead Trace Results")
+st.subheader("Step 2 — Verified Paid LeadTrace Results")
 row1 = st.columns(4)
 row1[0].metric("Total", report["total"])
 row1[1].metric("Campaign ready", report["campaign_ready"])
@@ -119,13 +145,32 @@ screening = queue[queue["phone_action"].eq("SCREENING_REVIEW")].copy()
 review = review_export(queue)
 
 preview = [
-    "seller_name", "phone", "phone_2", "phone_3", "phone_type", "email", "email_2",
-    "mailing_address", "property_address", "phone_action", "email_action", "campaign_action", "xleads_tags",
+    "seller_name",
+    "phone",
+    "phone_2",
+    "phone_3",
+    "phone_type",
+    "email",
+    "email_2",
+    "mailing_address",
+    "property_address",
+    "phone_action",
+    "email_action",
+    "campaign_action",
+    "xleads_tags",
 ]
 
-tabs = st.tabs([
-    "Campaign Ready", "Phone Ready", "Email Ready", "Email Only", "Phone DNC Hold", "Screening Review", "Full Audit"
-])
+tabs = st.tabs(
+    [
+        "Campaign Ready",
+        "Phone Ready",
+        "Email Ready",
+        "Email Only",
+        "Phone DNC Hold",
+        "Screening Review",
+        "Full Audit",
+    ]
+)
 
 with tabs[0]:
     show_html(campaign, preview)
@@ -156,7 +201,9 @@ with tabs[2]:
     )
 
 with tabs[3]:
-    st.caption("These records do not have a phone ready for calling/texting, but they do have an email ready for the email lane.")
+    st.caption(
+        "These records do not have a phone ready for calling/texting, but they do have an email ready for the email lane."
+    )
     show_html(email_only, preview)
     st.download_button(
         "Download Email-Only Queue",
