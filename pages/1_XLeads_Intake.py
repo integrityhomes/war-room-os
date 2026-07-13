@@ -5,17 +5,19 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from xleads_import_automation import (
-    HighLevelClient,
-    HighLevelConfig,
+from xleads_campaign_control import (
+    analyze_returned_export,
     build_report,
-    crm_export,
-    prepare_sync_dataframe,
+    campaign_export,
+    email_export,
+    is_returned_leadtrace,
+    phone_export,
+    prepare_skiptrace_upload,
     read_xleads_upload,
-    sync_safe_rows,
+    review_export,
 )
 
-st.set_page_config(page_title="XLeads Intake & CRM Sync", page_icon="📥", layout="wide")
+st.set_page_config(page_title="XLeads Skip Trace Control Center", page_icon="📥", layout="wide")
 
 
 def show_html(df: pd.DataFrame, columns: list[str], limit: int = 100) -> None:
@@ -34,10 +36,11 @@ def show_html(df: pd.DataFrame, columns: list[str], limit: int = 100) -> None:
     )
 
 
-st.title("XLeads Intake & CRM Sync")
+st.title("War Room XLeads Skip Trace Control Center")
 st.caption(
-    "Upload the XLeads ZIP or CSV, review owner/property mapping, then optionally sync only reviewed safe records to Ninja CRM. "
-    "This page never starts texting, calling, or follow-up workflows."
+    "Prepare a property list for XLeads Lead Trace, then upload the returned XLeads CSV or ZIP. "
+    "War Room selects screened phones and valid emails, keeps phone DNC rules separate from email, "
+    "and creates clean XLeads campaign files."
 )
 
 with st.sidebar:
@@ -45,112 +48,152 @@ with st.sidebar:
     default_tag = f"xleads-{datetime.now().strftime('%Y-%m-%d')}"
     campaign_tag = st.text_input("Campaign tag", value=default_tag)
 
-uploaded = st.file_uploader("Upload XLeads export", type=["csv", "zip"])
+uploaded = st.file_uploader("Upload a raw property CSV or returned XLeads Lead Trace CSV/ZIP", type=["csv", "zip"])
 if uploaded is None:
-    st.info("Upload the XLeads Lead Trace ZIP or extracted CSV to begin.")
+    st.info("Upload a raw property list to prepare it for Lead Trace, or upload the returned XLeads file to build campaign queues.")
     st.stop()
 
 try:
     raw_df, source_filename = read_xleads_upload(uploaded.name, uploaded.getvalue())
-    queue = prepare_sync_dataframe(raw_df, campaign_tag)
 except Exception as exc:
     st.error(str(exc))
     st.stop()
 
 st.success(f"Loaded {len(raw_df):,} rows from {source_filename}")
-report = build_report(queue)
-metrics = [
-    ("Total", report["total_rows"]),
-    ("Ready to sync", report["ready_to_sync"]),
-    ("DNC hold", report["dnc_holds"]),
-    ("Screening review", report["screening_review"]),
-    ("Multi-property", report["multi_property_review"]),
-    ("Duplicates", report["duplicates_suppressed"]),
-]
-for column, (label, value) in zip(st.columns(len(metrics)), metrics):
-    column.metric(label, value)
 
-st.warning(
-    "DNC=True or Litigator=True is held. Blank/unknown screening goes to Screening Review. "
-    "A later phone can be used when an earlier phone is blocked and the later phone is explicitly clear."
+if not is_returned_leadtrace(raw_df):
+    prepared = prepare_skiptrace_upload(raw_df)
+    st.subheader("Step 1 — Prepare for XLeads Lead Trace")
+    st.write(
+        "This file does not contain returned Lead Trace phone/email fields yet. "
+        "Download the cleaned upload below, run Lead Trace in XLeads, then bring the returned CSV or ZIP back to this page."
+    )
+    st.metric("Properties prepared", len(prepared))
+    preview_columns = [
+        "seller_name", "property_address", "mailing_address", "owner_type", "avm", "wholesale_value", "mls_status"
+    ]
+    show_html(prepared, preview_columns)
+    st.download_button(
+        "Download XLeads Lead Trace Upload",
+        prepared.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-xleads-leadtrace-upload.csv",
+        mime="text/csv",
+        type="primary",
+    )
+    st.stop()
+
+try:
+    queue = analyze_returned_export(raw_df, campaign_tag)
+    report = build_report(queue)
+except Exception as exc:
+    st.error(f"Could not process the returned XLeads file: {exc}")
+    st.stop()
+
+st.subheader("Step 2 — Returned Lead Trace Results")
+row1 = st.columns(4)
+row1[0].metric("Total", report["total"])
+row1[1].metric("Campaign ready", report["campaign_ready"])
+row1[2].metric("Phone ready", report["phone_ready"])
+row1[3].metric("Email ready", report["email_ready"])
+row2 = st.columns(4)
+row2[0].metric("Email only", report["email_only"])
+row2[1].metric("Phone DNC hold", report["dnc_phone_hold"])
+row2[2].metric("Screening review", report["screening_review"])
+row2[3].metric("No usable contact", report["no_contact"])
+
+st.info(
+    "Phone and email are separate lanes. DNC=True or Litigator=True blocks that phone from the phone queue, "
+    "but a valid email can still enter the email queue unless an email opt-out, unsubscribe, suppression, complaint, or bounce flag is present."
 )
+st.warning(
+    "War Room prepares files only. It does not automatically launch XLeads texting, AI voice, calling, or email workflows. "
+    "Review the queues before importing or starting campaigns."
+)
+
+campaign = campaign_export(queue)
+phone_ready = phone_export(queue)
+email_ready = email_export(queue)
+email_only = queue[queue["email_only"]].copy()
+dnc_hold = queue[queue["phone_action"].eq("DNC_PHONE_HOLD")].copy()
+screening = queue[queue["phone_action"].eq("SCREENING_REVIEW")].copy()
+review = review_export(queue)
 
 preview = [
-    "seller_name", "phone", "phone_2", "email", "mailing_address", "property_address",
-    "phone_type", "sync_action", "sync_reason", "property_count_for_contact", "crm_tags",
+    "seller_name", "phone", "phone_2", "phone_3", "phone_type", "email", "email_2",
+    "mailing_address", "property_address", "phone_action", "email_action", "campaign_action", "xleads_tags",
 ]
-all_tab, ready_tab, dnc_tab, review_tab, other_tab, sync_tab = st.tabs(
-    ["All", "Ready", "DNC Hold", "Screening Review", "Other Holds", "Ninja CRM Sync"]
-)
 
-with all_tab:
-    show_html(queue, preview)
+tabs = st.tabs([
+    "Campaign Ready", "Phone Ready", "Email Ready", "Email Only", "Phone DNC Hold", "Screening Review", "Full Audit"
+])
 
-with ready_tab:
-    ready = queue[queue["sync_action"].eq("READY_TO_SYNC")].copy()
-    show_html(ready, preview)
+with tabs[0]:
+    show_html(campaign, preview)
+    st.download_button(
+        "Download XLeads Combined Campaign Queue",
+        campaign.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-xleads-campaign-ready.csv",
+        mime="text/csv",
+        type="primary",
+    )
 
-with dnc_tab:
-    dnc_hold = queue[queue["sync_action"].eq("DNC_HOLD")].copy()
+with tabs[1]:
+    show_html(phone_ready, preview)
+    st.download_button(
+        "Download XLeads Phone-Ready Queue",
+        phone_ready.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-xleads-phone-ready.csv",
+        mime="text/csv",
+    )
+
+with tabs[2]:
+    show_html(email_ready, preview)
+    st.download_button(
+        "Download XLeads Email-Ready Queue",
+        email_ready.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-xleads-email-ready.csv",
+        mime="text/csv",
+    )
+
+with tabs[3]:
+    st.caption("These records do not have a phone ready for calling/texting, but they do have an email ready for the email lane.")
+    show_html(email_only, preview)
+    st.download_button(
+        "Download Email-Only Queue",
+        email_only.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-xleads-email-only.csv",
+        mime="text/csv",
+    )
+
+with tabs[4]:
     show_html(dnc_hold, preview)
+    st.download_button(
+        "Download Phone DNC Hold Audit",
+        dnc_hold.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-phone-dnc-hold.csv",
+        mime="text/csv",
+    )
 
-with review_tab:
-    screening = queue[queue["sync_action"].eq("SCREENING_REVIEW")].copy()
+with tabs[5]:
     show_html(screening, preview)
-
-with other_tab:
-    other = queue[~queue["sync_action"].isin(["READY_TO_SYNC", "DNC_HOLD", "SCREENING_REVIEW"])].copy()
-    show_html(other, preview)
-
-with sync_tab:
-    export_df = crm_export(queue)
     st.download_button(
-        "Download cleaned CRM queue",
-        export_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"{campaign_tag}-crm-queue.csv",
-        mime="text/csv",
-    )
-    st.download_button(
-        "Download held-record review queue",
-        queue[~queue["safe_to_sync"]].to_csv(index=False).encode("utf-8"),
-        file_name=f"{campaign_tag}-held-review.csv",
+        "Download Screening Review Queue",
+        screening.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-phone-screening-review.csv",
         mime="text/csv",
     )
 
-    st.divider()
-    st.subheader("Optional direct Ninja CRM sync")
-    secrets = st.secrets
-    config = HighLevelConfig(
-        token=str(secrets.get("HIGHLEVEL_TOKEN", "")),
-        location_id=str(secrets.get("HIGHLEVEL_LOCATION_ID", "")),
-        property_address_field=str(secrets.get("HIGHLEVEL_PROPERTY_ADDRESS_FIELD", "")),
-        property_city_field=str(secrets.get("HIGHLEVEL_PROPERTY_CITY_FIELD", "")),
-        property_state_field=str(secrets.get("HIGHLEVEL_PROPERTY_STATE_FIELD", "")),
-        property_zip_field=str(secrets.get("HIGHLEVEL_PROPERTY_ZIP_FIELD", "")),
-        api_base=str(secrets.get("HIGHLEVEL_API_BASE", "https://services.leadconnectorhq.com")),
+with tabs[6]:
+    show_html(queue, preview)
+    st.download_button(
+        "Download Full War Room Audit",
+        queue.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-war-room-full-audit.csv",
+        mime="text/csv",
     )
-
-    if not config.configured:
-        st.info("Direct sync is not configured. Dry-run downloads work without credentials.")
-    else:
-        confirmation = st.checkbox(
-            f"I reviewed the dry run and approve updating {report['ready_to_sync']:,} READY_TO_SYNC records."
-        )
-        if st.button("Sync safe records to Ninja CRM", type="primary", disabled=not confirmation):
-            with st.spinner("Updating Ninja CRM contacts..."):
-                st.session_state["xleads_sync_results"] = sync_safe_rows(queue, HighLevelClient(config))
-
-        if "xleads_sync_results" in st.session_state:
-            results = st.session_state["xleads_sync_results"]
-            success = int((results["sync_result"] == "SUCCESS").sum()) if not results.empty else 0
-            failed = int((results["sync_result"] == "FAILED").sum()) if not results.empty else 0
-            left, right = st.columns(2)
-            left.metric("Successful", success)
-            right.metric("Failed", failed)
-            show_html(results, ["audit_id", "seller_name", "phone", "property_address", "sync_result", "contact_id", "error"])
-            st.download_button(
-                "Download sync audit report",
-                results.to_csv(index=False).encode("utf-8"),
-                file_name=f"{campaign_tag}-sync-audit.csv",
-                mime="text/csv",
-            )
+    st.download_button(
+        "Download All Non-Campaign Review Records",
+        review.to_csv(index=False).encode("utf-8"),
+        file_name=f"{campaign_tag}-war-room-review.csv",
+        mime="text/csv",
+    )
