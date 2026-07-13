@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+
 import pandas as pd
 import streamlit as st
 
@@ -8,6 +9,13 @@ st.set_page_config(page_title="XLeads DNC Safety Gate", page_icon="🛡️", lay
 
 CLEAR = {"clear", "cleared", "no", "false", "0", "not listed", "not on dnc", "approved", "ok", "pass", "passed"}
 BLOCK = {"yes", "true", "1", "listed", "on dnc", "blocked", "dnc", "stop", "do not call", "do not text"}
+OUTPUT_COLUMNS = {
+    "seller_name", "property_address", "first_found_phone", "xleads_screened_phone",
+    "xleads_screened_phone_type", "xleads_screen_status", "national_dnc_status",
+    "state_dnc_status", "company_dnc_status", "prior_opt_out", "wrong_number",
+    "compliance_status", "phone", "xleads_action", "call_lane", "must_call",
+    "ai_call_allowed", "human_call_task_allowed", "compliance_reason",
+}
 
 
 def clean(value) -> str:
@@ -21,18 +29,21 @@ def norm(value) -> str:
     return re.sub(r"[^a-z0-9]+", "_", clean(value).lower()).strip("_")
 
 
+def unique_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+
+
 def normalize_phone(value) -> str:
     try:
         if pd.isna(value):
             return ""
     except (TypeError, ValueError):
         pass
-    if isinstance(value, float) and value.is_integer():
-        text = str(int(value))
-    else:
-        text = clean(value)
+
+    text = str(int(value)) if isinstance(value, float) and value.is_integer() else clean(value)
     if re.fullmatch(r"\d+\.0+", text):
         text = text.split(".", 1)[0]
+
     digits = re.sub(r"\D", "", text)
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
@@ -48,153 +59,162 @@ def parse_flag(value) -> str:
     return "UNKNOWN"
 
 
-def first_col(df: pd.DataFrame, names: list[str]) -> str | None:
-    lookup = {norm(c): c for c in df.columns}
+def find_column(df: pd.DataFrame, names: list[str]) -> str | None:
+    lookup = {norm(column): str(column) for column in df.columns}
     for name in names:
-        found = lookup.get(norm(name))
-        if found is not None:
-            return found
+        if norm(name) in lookup:
+            return lookup[norm(name)]
     return None
 
 
-def text_series(df: pd.DataFrame, names: list[str]) -> pd.Series:
-    col = first_col(df, names)
-    if col is None:
+def get_text(df: pd.DataFrame, names: list[str]) -> pd.Series:
+    column = find_column(df, names)
+    if column is None:
         return pd.Series([""] * len(df), index=df.index, dtype="object")
-    return df[col].fillna("").astype(str)
+    return df[column].fillna("").astype(str)
 
 
 def detect_phone_groups(df: pd.DataFrame) -> list[dict[str, str]]:
-    lookup = {norm(c): str(c) for c in df.columns}
-    groups: list[dict[str, str]] = []
+    lookup = {norm(column): str(column) for column in df.columns}
+    groups = []
     for column in df.columns:
-        n = norm(column)
-        if not re.fullmatch(r"contact\d+phone_\d+", n):
-            continue
-        groups.append({
-            "phone": str(column),
-            "type": lookup.get(f"{n}_type", ""),
-            "dnc": lookup.get(f"{n}_dnc", ""),
-            "litigator": lookup.get(f"{n}_litigator", ""),
-        })
+        key = norm(column)
+        if re.fullmatch(r"contact\d+phone_\d+", key):
+            groups.append(
+                {
+                    "phone": str(column),
+                    "type": lookup.get(f"{key}_type", ""),
+                    "dnc": lookup.get(f"{key}_dnc", ""),
+                    "litigator": lookup.get(f"{key}_litigator", ""),
+                }
+            )
     return groups
 
 
-def schema_report(df: pd.DataFrame) -> pd.DataFrame:
+def inspect_columns(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for column in df.columns:
-        n = norm(column)
-        if not any(t in n for t in ["phone", "dnc", "litigator", "opt_out", "wrong_number"]):
+    for position, column in enumerate(df.columns):
+        key = norm(column)
+        if not any(token in key for token in ["phone", "dnc", "litigator", "opt_out", "wrong_number"]):
             continue
-        vals = [clean(v) for v in df[column].tolist() if clean(v)]
-        rows.append({
-            "column": str(column),
-            "nonblank_rows": len(vals),
-            "sample_values": " | ".join(list(dict.fromkeys(vals))[:3]),
-        })
+        series = df.iloc[:, position]
+        values = [clean(value) for value in series.tolist() if clean(value)]
+        rows.append(
+            {
+                "column": str(column),
+                "nonblank_rows": len(values),
+                "sample_values": " | ".join(list(dict.fromkeys(values))[:3]),
+            }
+        )
     return pd.DataFrame(rows)
 
 
-def evaluate_row(row: pd.Series, groups: list[dict[str, str]]) -> pd.Series:
+def evaluate_contact(row: pd.Series, groups: list[dict[str, str]]) -> pd.Series:
     first_found = ""
     first_clear = ""
     first_type = ""
-    saw_valid = False
-    saw_dnc_block = False
-    saw_litigator_block = False
-    saw_unknown = False
+    saw_dnc = saw_litigator = saw_unknown = False
 
     for group in groups:
         candidate = normalize_phone(row.get(group["phone"], ""))
         if not candidate:
             continue
-        saw_valid = True
         if not first_found:
             first_found = candidate
+
         dnc_status = parse_flag(row.get(group["dnc"], "")) if group["dnc"] else "UNKNOWN"
-        lit_status = parse_flag(row.get(group["litigator"], "")) if group["litigator"] else "UNKNOWN"
-        saw_dnc_block = saw_dnc_block or dnc_status == "BLOCKED"
-        saw_litigator_block = saw_litigator_block or lit_status == "BLOCKED"
-        saw_unknown = saw_unknown or dnc_status == "UNKNOWN" or lit_status == "UNKNOWN"
-        if dnc_status == "CLEAR" and lit_status == "CLEAR" and not first_clear:
+        litigator_status = parse_flag(row.get(group["litigator"], "")) if group["litigator"] else "UNKNOWN"
+
+        saw_dnc = saw_dnc or dnc_status == "BLOCKED"
+        saw_litigator = saw_litigator or litigator_status == "BLOCKED"
+        saw_unknown = saw_unknown or dnc_status == "UNKNOWN" or litigator_status == "UNKNOWN"
+
+        if dnc_status == "CLEAR" and litigator_status == "CLEAR" and not first_clear:
             first_clear = candidate
             first_type = clean(row.get(group["type"], "")) if group["type"] else ""
 
     if first_clear:
         status = "XLEADS_DNC_AND_LITIGATOR_CLEAR"
-    elif not saw_valid:
+    elif not first_found:
         status = "NO_VALID_PHONE"
-    elif saw_dnc_block:
+    elif saw_dnc:
         status = "XLEADS_DNC_BLOCKED"
-    elif saw_litigator_block:
+    elif saw_litigator:
         status = "XLEADS_LITIGATOR_BLOCKED"
     elif saw_unknown:
         status = "XLEADS_SCREEN_UNKNOWN"
     else:
         status = "NO_CLEAR_PHONE"
 
-    return pd.Series({
-        "first_found_phone": first_found,
-        "xleads_screened_phone": first_clear,
-        "xleads_screened_phone_type": first_type,
-        "xleads_screen_status": status,
-    })
+    return pd.Series(
+        {
+            "first_found_phone": first_found,
+            "xleads_screened_phone": first_clear,
+            "xleads_screened_phone_type": first_type,
+            "xleads_screen_status": status,
+        }
+    )
 
 
-def apply_gate(df: pd.DataFrame) -> pd.DataFrame:
-    output = df.copy()
-    output["seller_name"] = text_series(output, ["seller_name", "seller name", "owner_name", "owner name", "name"])
-    output["property_address"] = text_series(output, ["property_address", "property address", "address"])
-    groups = detect_phone_groups(output)
-    evaluated = output.apply(lambda r: evaluate_row(r, groups), axis=1)
-    output = pd.concat([output, evaluated], axis=1)
+def apply_gate(source: pd.DataFrame) -> pd.DataFrame:
+    df = unique_columns(source)
+    df = df.drop(columns=[column for column in OUTPUT_COLUMNS if column in df.columns], errors="ignore")
 
-    output["national_dnc_status"] = "UNKNOWN"
-    output["state_dnc_status"] = "UNKNOWN"
-    output["company_dnc_status"] = "UNKNOWN"
-    output["prior_opt_out"] = False
-    output["wrong_number"] = False
+    df["seller_name"] = get_text(df, ["seller_name", "seller name", "owner_name", "owner name", "name"])
+    df["property_address"] = get_text(df, ["property_address", "property address", "address"])
 
-    for column in output.columns:
-        n = norm(column)
-        if "opt_out" in n or "do_not_contact" in n:
-            output["prior_opt_out"] = output["prior_opt_out"] | output[column].fillna("").astype(str).map(lambda v: parse_flag(v) == "BLOCKED")
-        if "wrong_number" in n:
-            output["wrong_number"] = output["wrong_number"] | output[column].fillna("").astype(str).map(lambda v: parse_flag(v) == "BLOCKED")
+    groups = detect_phone_groups(df)
+    df = pd.concat([df, df.apply(lambda row: evaluate_contact(row, groups), axis=1)], axis=1)
 
-    xleads_clear = output["xleads_screen_status"].eq("XLEADS_DNC_AND_LITIGATOR_CLEAR")
-    output["compliance_status"] = "COMPLIANCE_HOLD_DO_NOT_CALL_OR_TEXT"
-    output.loc[xleads_clear, "compliance_status"] = "XLEADS_CLEAR_PENDING_DNC_SCOPE_CONFIRMATION"
-    output["phone"] = ""
-    output["xleads_action"] = "HOLD_COMPLIANCE"
-    output["call_lane"] = "Compliance Hold / No Call"
-    for column in ["must_call", "ai_call_allowed", "human_call_task_allowed"]:
-        if column not in output.columns:
-            output[column] = False
-        output[column] = False
+    df["national_dnc_status"] = "UNKNOWN"
+    df["state_dnc_status"] = "UNKNOWN"
+    df["company_dnc_status"] = "UNKNOWN"
+    df["prior_opt_out"] = False
+    df["wrong_number"] = False
+
+    for column in list(df.columns):
+        key = norm(column)
+        values = df[column].fillna("").astype(str)
+        if "opt_out" in key or "do_not_contact" in key:
+            df["prior_opt_out"] = df["prior_opt_out"] | values.map(lambda value: parse_flag(value) == "BLOCKED")
+        if "wrong_number" in key:
+            df["wrong_number"] = df["wrong_number"] | values.map(lambda value: parse_flag(value) == "BLOCKED")
+
+    clear = df["xleads_screen_status"].eq("XLEADS_DNC_AND_LITIGATOR_CLEAR")
+    df["compliance_status"] = "COMPLIANCE_HOLD_DO_NOT_CALL_OR_TEXT"
+    df.loc[clear, "compliance_status"] = "XLEADS_CLEAR_PENDING_DNC_SCOPE_CONFIRMATION"
+    df["phone"] = ""
+    df["xleads_action"] = "HOLD_COMPLIANCE"
+    df["call_lane"] = "Compliance Hold / No Call"
+    df["must_call"] = False
+    df["ai_call_allowed"] = False
+    df["human_call_task_allowed"] = False
 
     def reason(row: pd.Series) -> str:
         reasons = []
         if row["xleads_screen_status"] != "XLEADS_DNC_AND_LITIGATOR_CLEAR":
             reasons.append(row["xleads_screen_status"])
-        reasons += ["NATIONAL_DNC_NOT_CONFIRMED", "STATE_DNC_NOT_CONFIRMED", "COMPANY_DNC_NOT_CONFIRMED"]
-        if row["prior_opt_out"]:
+        reasons.extend(
+            ["NATIONAL_DNC_NOT_CONFIRMED", "STATE_DNC_NOT_CONFIRMED", "COMPANY_DNC_NOT_CONFIRMED"]
+        )
+        if bool(row["prior_opt_out"]):
             reasons.append("PRIOR_OPT_OUT")
-        if row["wrong_number"]:
+        if bool(row["wrong_number"]):
             reasons.append("WRONG_NUMBER")
         return " | ".join(reasons)
 
-    output["compliance_reason"] = output.apply(reason, axis=1)
-    return output
+    df["compliance_reason"] = df.apply(reason, axis=1)
+    return unique_columns(df)
 
 
 def show_html(df: pd.DataFrame, columns: list[str], limit: int = 100) -> None:
     if df.empty:
         st.caption("No records in this queue.")
         return
-    view = df[[c for c in columns if c in df.columns]].head(limit).copy()
-    for c in view.columns:
-        view[c] = view[c].fillna("").astype(str)
+    view = unique_columns(df)
+    view = view[[column for column in columns if column in view.columns]].head(limit).copy()
+    for column in view.columns:
+        view[column] = view[column].fillna("").astype(str)
     st.markdown(
         '<div style="max-height:520px;overflow:auto;border:1px solid #ddd;border-radius:6px">'
         + view.to_html(index=False, escape=True)
@@ -207,38 +227,68 @@ st.title("War Room OS")
 st.subheader("XLeads Phone-by-Phone DNC + Litigator Safety Gate")
 st.error(
     "DNC=True, Litigator=True, blank screening, or unknown screening is blocked. "
-    "DNC=False and Litigator=False only passes XLeads screening. Contact remains blocked until federal, state, and company DNC scope is confirmed."
+    "DNC=False and Litigator=False only passes XLeads screening. "
+    "Contact remains blocked until federal, state, and company DNC scope is confirmed."
 )
 
 uploaded = st.file_uploader("Upload the XLeads export CSV", type=["csv"], key="xleads_dnc_upload")
-source_df = pd.read_csv(uploaded) if uploaded is not None else st.session_state.get("scored_df")
-if source_df is None:
-    st.warning("Upload the XLeads CSV here, or run Intelligent Lead Ranking first.")
+if uploaded is None:
+    st.warning("Upload the XLeads CSV on this page to run the safety gate.")
     st.stop()
 
-report = schema_report(source_df)
+try:
+    source_df = unique_columns(pd.read_csv(uploaded))
+    report = inspect_columns(source_df)
+except Exception as exc:
+    st.error(f"Could not read or inspect the XLeads CSV: {exc}")
+    st.stop()
+
 with st.expander("Inspect detected XLeads phone, DNC, and litigator columns", expanded=True):
     show_html(report, ["column", "nonblank_rows", "sample_values"], limit=200)
-    st.download_button("Download XLeads Column Report", report.to_csv(index=False).encode("utf-8"), "xleads_column_report.csv", "text/csv")
+    st.download_button(
+        "Download XLeads Column Report",
+        report.to_csv(index=False).encode("utf-8"),
+        "xleads_column_report.csv",
+        "text/csv",
+    )
 
 if st.button("Apply Hard DNC Safety Gate", type="primary"):
-    gated = apply_gate(source_df)
+    try:
+        gated = apply_gate(source_df)
+    except Exception as exc:
+        st.error(f"Could not apply the DNC safety gate: {exc}")
+        st.stop()
+
     st.session_state["scored_df"] = gated
     pending = gated[gated["compliance_status"].eq("XLEADS_CLEAR_PENDING_DNC_SCOPE_CONFIRMATION")].copy()
     hold = gated[gated["compliance_status"].eq("COMPLIANCE_HOLD_DO_NOT_CALL_OR_TEXT")].copy()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total checked", len(gated))
-    c2.metric("XLeads DNC + litigator clear", len(pending))
-    c3.metric("Final approved", 0)
-    c4.metric("Blocked / hold", len(gated))
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total checked", len(gated))
+    col2.metric("XLeads DNC + litigator clear", len(pending))
+    col3.metric("Final approved", 0)
+    col4.metric("Blocked / hold", len(gated))
 
-    display = ["seller_name", "property_address", "first_found_phone", "xleads_screened_phone", "xleads_screened_phone_type", "xleads_screen_status", "compliance_status", "compliance_reason"]
+    display = [
+        "seller_name", "property_address", "first_found_phone", "xleads_screened_phone",
+        "xleads_screened_phone_type", "xleads_screen_status", "compliance_status",
+        "compliance_reason",
+    ]
 
     st.write("### XLeads Clear - Still Do Not Call or Text")
     show_html(pending, display)
-    st.download_button("Download XLeads-Clear Pending Verification", pending.to_csv(index=False).encode("utf-8"), "war_room_xleads_clear_pending_verification.csv", "text/csv")
+    st.download_button(
+        "Download XLeads-Clear Pending Verification",
+        pending.to_csv(index=False).encode("utf-8"),
+        "war_room_xleads_clear_pending_verification.csv",
+        "text/csv",
+    )
 
     st.write("### Compliance Hold - Do Not Call or Text")
     show_html(hold, display)
-    st.download_button("Download Compliance Hold List", hold.to_csv(index=False).encode("utf-8"), "war_room_compliance_hold_do_not_call_or_text.csv", "text/csv")
+    st.download_button(
+        "Download Compliance Hold List",
+        hold.to_csv(index=False).encode("utf-8"),
+        "war_room_compliance_hold_do_not_call_or_text.csv",
+        "text/csv",
+    )
