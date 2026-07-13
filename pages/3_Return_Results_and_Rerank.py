@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 import requests
@@ -45,20 +46,52 @@ def is_truthy(value) -> bool:
     return clean_text(value).lower() in TRUTHY
 
 
-def sheet_csv_url() -> str:
+def google_sheet_to_csv_url(value: str) -> str:
+    value = clean_text(value)
+    if not value:
+        return ""
+    if "export?format=csv" in value or "output=csv" in value:
+        return value
+
+    match = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", value)
+    if not match:
+        return value
+
+    sheet_id = match.group(1)
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+    gid = query.get("gid", [""])[0]
+    if not gid and parsed.fragment:
+        fragment = parse_qs(parsed.fragment)
+        gid = fragment.get("gid", [""])[0]
+    gid = gid or "0"
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+
+def configured_sheet_value() -> str:
     direct = get_secret("SKIPTRACE_RESULTS_CSV_URL")
     if direct:
         return direct
+
+    normal_link = get_secret("SKIPTRACE_RESULTS_SHEET_URL")
+    if normal_link:
+        return normal_link
+
     sheet_id = get_secret("SKIPTRACE_RESULTS_SHEET_ID")
     gid = get_secret("SKIPTRACE_RESULTS_GID", "0")
     if sheet_id:
-        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit?gid={gid}#gid={gid}"
     return ""
 
 
 def read_results(url: str) -> pd.DataFrame:
     response = requests.get(url, timeout=30)
     response.raise_for_status()
+    content_type = clean_text(response.headers.get("content-type", "")).lower()
+    if "text/html" in content_type:
+        raise ValueError(
+            "Google returned a sign-in or permission page instead of CSV. Share the sheet as Anyone with the link — Viewer, or add Google service-account access."
+        )
     return pd.read_csv(io.BytesIO(response.content))
 
 
@@ -141,20 +174,34 @@ if "scored_df" not in st.session_state:
     st.warning("Run Intelligent Lead Ranking on the main page first.")
     st.stop()
 
-url = sheet_csv_url()
-if not url:
+saved_value = configured_sheet_value()
+current_value = st.session_state.get("skiptrace_results_sheet_url", saved_value)
+sheet_value = st.text_input(
+    "War Room Skip Trace Queue Google Sheet link",
+    value=current_value,
+    placeholder="Paste the normal Google Sheets edit link here",
+)
+if sheet_value:
+    st.session_state["skiptrace_results_sheet_url"] = sheet_value
+
+csv_url = google_sheet_to_csv_url(sheet_value)
+if not csv_url:
     st.error(
-        "The return sheet is not connected yet. Add SKIPTRACE_RESULTS_CSV_URL, or add "
-        "SKIPTRACE_RESULTS_SHEET_ID and SKIPTRACE_RESULTS_GID, in Streamlit secrets."
+        "Paste the War Room Skip Trace Queue Google Sheet link above. For a permanent connection, save it in Streamlit secrets as SKIPTRACE_RESULTS_SHEET_URL."
     )
     st.stop()
 
-st.success("Skip-trace return sheet is connected.")
+if saved_value:
+    st.success("Permanent skip-trace return sheet connection is configured.")
+else:
+    st.info(
+        "This sheet is connected for the current app session. Save the same link as SKIPTRACE_RESULTS_SHEET_URL in Streamlit secrets to make it permanent across restarts."
+    )
 
 if st.button("Pull Completed Results and Rerank", type="primary"):
     with st.spinner("Reading the return sheet, merging results, and reranking leads..."):
         try:
-            results_df = read_results(url)
+            results_df = read_results(csv_url)
         except Exception as exc:
             st.error(f"Could not read the skip-trace return sheet: {exc}")
             st.stop()
