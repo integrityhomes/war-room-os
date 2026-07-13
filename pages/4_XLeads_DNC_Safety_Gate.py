@@ -23,7 +23,21 @@ def norm(value) -> str:
 
 
 def normalize_phone(value) -> str:
-    digits = re.sub(r"\D", "", clean(value))
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, float) and value.is_integer():
+        text = str(int(value))
+    else:
+        text = clean(value)
+
+    if re.fullmatch(r"\d+\.0+", text):
+        text = text.split(".", 1)[0]
+
+    digits = re.sub(r"\D", "", text)
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
     return digits if len(digits) == 10 else ""
