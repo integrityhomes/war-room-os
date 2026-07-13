@@ -61,12 +61,19 @@ with st.expander("TEAM INSTRUCTIONS — START HERE", expanded=True):
 2. War Room will show **Paid LeadTrace Not Verified** and create a cleaned file.
 3. Click **Download XLeads Paid LeadTrace Upload**.
 4. In XLeads, upload that file into **Property Leads / My Leads**.
-5. In XLeads, run the paid **LeadTrace — Owner Contact Info** export.
-6. Download the completed XLeads CSV or ZIP from XLeads.
-7. Return to this page and upload the completed result.
-8. Confirm the green message **Paid LeadTrace Verified**.
-9. Download **Phone Ready** for the XLeads text/AI-voice workflow.
-10. Download **Email Ready** for the XLeads email workflow.
+5. In XLeads, open **Export Leads** and check all six boxes below:
+   - **Overview**
+   - **Lead Trace — Owner Contact Info**
+   - **Property Details**
+   - **Valuations**
+   - **Loans**
+   - **Liens**
+6. Click **Export Leads** to run the paid LeadTrace export.
+7. Download the completed XLeads CSV or ZIP from XLeads.
+8. Return to this page and upload the completed result.
+9. Confirm the green message **Paid LeadTrace Verified**.
+10. Download **Phone Ready** for the XLeads text/AI-voice workflow.
+11. Download **Email Ready** for the XLeads email workflow.
 
 ### Important rules
 
@@ -130,8 +137,8 @@ if not verification.verified:
     prepared = prepare_skiptrace_upload(raw_df)
     st.subheader("Your next action: run paid XLeads LeadTrace")
     st.write(
-        "Download the cleaned file below, upload it into XLeads, run paid LeadTrace, "
-        "then upload the completed XLeads CSV or ZIP back to this same page."
+        "Download the cleaned file below, upload it into XLeads, select Overview, Lead Trace, Property Details, "
+        "Valuations, Loans, and Liens, then upload the completed XLeads CSV or ZIP back to this same page."
     )
     st.metric("Properties prepared", len(prepared))
     preview_columns = [
