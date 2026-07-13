@@ -1,5 +1,2 @@
-streamlit
-pandas
-openai
-requests
-python-dateutil
+streamlit==1.53.1
+requests==2.32.5
