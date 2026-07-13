@@ -41,6 +41,26 @@ def safe_value(value):
     return value
 
 
+def show_html_table(df: pd.DataFrame, columns: list[str] | None = None, limit: int = 100) -> None:
+    if df.empty:
+        st.caption("No records to display.")
+        return
+    view = df.copy()
+    if columns:
+        view = view[[column for column in columns if column in view.columns]].copy()
+    if len(view) > limit:
+        st.caption(f"Showing first {limit} of {len(view)} records.")
+        view = view.head(limit).copy()
+    for column in view.columns:
+        view[column] = view[column].fillna("").astype(str)
+    st.markdown(
+        '<div style="max-height:520px;overflow:auto;border:1px solid #ddd;border-radius:6px">'
+        + view.to_html(index=False, escape=True)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def lead_key(row: pd.Series) -> str:
     raw = "|".join(
         [
@@ -172,8 +192,7 @@ preview_columns = [
     if column in unsent.columns
 ]
 
-if not unsent.empty:
-    st.dataframe(unsent[preview_columns].head(100), use_container_width=True, hide_index=True)
+show_html_table(unsent, preview_columns, limit=100)
 
 st.caption(
     "Duplicate protection checks both the current session and the connected Google Sheet before sending."
@@ -217,7 +236,7 @@ if st.button("Run Automatic Skip Trace", type="primary", disabled=unsent.empty):
     else:
         st.warning(f"Sent {successful}; {failed} failed. Review the audit table below.")
 
-    st.dataframe(result_df, use_container_width=True, hide_index=True)
+    show_html_table(result_df, limit=100)
     st.download_button(
         "Download Skip Trace Audit Log",
         result_df.to_csv(index=False).encode("utf-8"),
