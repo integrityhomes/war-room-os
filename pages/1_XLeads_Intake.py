@@ -15,23 +15,39 @@ from xleads_import_automation import (
     sync_safe_rows,
 )
 
-
 st.set_page_config(page_title="XLeads Intake & CRM Sync", page_icon="📥", layout="wide")
+
+
+def show_html(df: pd.DataFrame, columns: list[str], limit: int = 100) -> None:
+    if df.empty:
+        st.caption("No records in this queue.")
+        return
+    view = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+    view = view[[column for column in columns if column in view.columns]].head(limit).copy()
+    for column in view.columns:
+        view[column] = view[column].fillna("").astype(str)
+    st.markdown(
+        '<div style="max-height:520px;overflow:auto;border:1px solid #ddd;border-radius:6px">'
+        + view.to_html(index=False, escape=True)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 st.title("XLeads Intake & CRM Sync")
 st.caption(
-    "Upload the XLeads ZIP or CSV, review the owner/property mapping, then optionally sync only safe records to Ninja CRM. "
-    "This page never starts a texting, calling, or follow-up workflow."
+    "Upload the XLeads ZIP or CSV, review owner/property mapping, then optionally sync only reviewed safe records to Ninja CRM. "
+    "This page never starts texting, calling, or follow-up workflows."
 )
 
 with st.sidebar:
     st.header("Batch settings")
     default_tag = f"xleads-{datetime.now().strftime('%Y-%m-%d')}"
     campaign_tag = st.text_input("Campaign tag", value=default_tag)
-    st.caption("Use a unique tag for each list so your team can find the batch later.")
 
 uploaded = st.file_uploader("Upload XLeads export", type=["csv", "zip"])
 if uploaded is None:
-    st.info("Upload the XLeads Lead Trace ZIP or the extracted CSV to begin.")
+    st.info("Upload the XLeads Lead Trace ZIP or extracted CSV to begin.")
     st.stop()
 
 try:
@@ -43,48 +59,50 @@ except Exception as exc:
 
 st.success(f"Loaded {len(raw_df):,} rows from {source_filename}")
 report = build_report(queue)
-metric_items = [
-    ("Total rows", report["total_rows"]),
+metrics = [
+    ("Total", report["total_rows"]),
     ("Ready to sync", report["ready_to_sync"]),
-    ("DNC holds", report["dnc_holds"]),
-    ("Multi-property review", report["multi_property_review"]),
-    ("Duplicates suppressed", report["duplicates_suppressed"]),
-    ("Missing phone/email", report["missing_contact_match"]),
-    ("Missing property", report["missing_property"]),
+    ("DNC hold", report["dnc_holds"]),
+    ("Screening review", report["screening_review"]),
+    ("Multi-property", report["multi_property_review"]),
+    ("Duplicates", report["duplicates_suppressed"]),
 ]
-for column, (label, value) in zip(st.columns(len(metric_items)), metric_items):
+for column, (label, value) in zip(st.columns(len(metrics)), metrics):
     column.metric(label, value)
 
 st.warning(
-    "Owners tied to more than one property are held for review so one property address cannot overwrite another on a single contact record."
+    "DNC=True or Litigator=True is held. Blank/unknown screening goes to Screening Review. "
+    "A later phone can be used when an earlier phone is blocked and the later phone is explicitly clear."
 )
 
-preview_columns = [
+preview = [
     "seller_name", "phone", "phone_2", "email", "mailing_address", "property_address",
-    "phone_type", "dnc_hold", "property_count_for_contact", "sync_action", "sync_reason", "crm_tags",
+    "phone_type", "sync_action", "sync_reason", "property_count_for_contact", "crm_tags",
 ]
-preview_columns = [column for column in preview_columns if column in queue.columns]
+all_tab, ready_tab, dnc_tab, review_tab, other_tab, sync_tab = st.tabs(
+    ["All", "Ready", "DNC Hold", "Screening Review", "Other Holds", "Ninja CRM Sync"]
+)
 
-review_tab, safe_tab, hold_tab, sync_tab = st.tabs([
-    "All records", "Ready to sync", "Held for review", "Ninja CRM sync"
-])
+with all_tab:
+    show_html(queue, preview)
+
+with ready_tab:
+    ready = queue[queue["sync_action"].eq("READY_TO_SYNC")].copy()
+    show_html(ready, preview)
+
+with dnc_tab:
+    dnc_hold = queue[queue["sync_action"].eq("DNC_HOLD")].copy()
+    show_html(dnc_hold, preview)
 
 with review_tab:
-    st.dataframe(queue[preview_columns], use_container_width=True, hide_index=True)
+    screening = queue[queue["sync_action"].eq("SCREENING_REVIEW")].copy()
+    show_html(screening, preview)
 
-with safe_tab:
-    safe_queue = queue[queue["safe_to_sync"]].copy()
-    st.dataframe(safe_queue[preview_columns], use_container_width=True, hide_index=True)
-
-with hold_tab:
-    held = queue[~queue["safe_to_sync"]].copy()
-    st.dataframe(held[preview_columns], use_container_width=True, hide_index=True)
+with other_tab:
+    other = queue[~queue["sync_action"].isin(["READY_TO_SYNC", "DNC_HOLD", "SCREENING_REVIEW"])].copy()
+    show_html(other, preview)
 
 with sync_tab:
-    st.subheader("Dry-run export")
-    st.write(
-        "Download this cleaned file for audit or manual CRM import. Mailing address and targeted property address remain separate."
-    )
     export_df = crm_export(queue)
     st.download_button(
         "Download cleaned CRM queue",
@@ -101,10 +119,6 @@ with sync_tab:
 
     st.divider()
     st.subheader("Optional direct Ninja CRM sync")
-    st.caption(
-        "Credentials stay in Streamlit Secrets. The sync only upserts contacts and custom fields; it does not add anyone to a workflow."
-    )
-
     secrets = st.secrets
     config = HighLevelConfig(
         token=str(secrets.get("HIGHLEVEL_TOKEN", "")),
@@ -117,30 +131,23 @@ with sync_tab:
     )
 
     if not config.configured:
-        st.info(
-            "Direct sync is not configured yet. Add HIGHLEVEL_TOKEN, HIGHLEVEL_LOCATION_ID, and the four property custom-field IDs/keys to Streamlit Secrets. "
-            "The dry-run files above work now without credentials."
-        )
+        st.info("Direct sync is not configured. Dry-run downloads work without credentials.")
     else:
         confirmation = st.checkbox(
-            f"I reviewed the dry run and approve updating {report['ready_to_sync']:,} safe records."
+            f"I reviewed the dry run and approve updating {report['ready_to_sync']:,} READY_TO_SYNC records."
         )
         if st.button("Sync safe records to Ninja CRM", type="primary", disabled=not confirmation):
-            if report["ready_to_sync"] == 0:
-                st.warning("There are no safe records to sync.")
-            else:
-                with st.spinner("Updating Ninja CRM contacts..."):
-                    results = sync_safe_rows(queue, HighLevelClient(config))
-                st.session_state["xleads_sync_results"] = results
+            with st.spinner("Updating Ninja CRM contacts..."):
+                st.session_state["xleads_sync_results"] = sync_safe_rows(queue, HighLevelClient(config))
 
         if "xleads_sync_results" in st.session_state:
-            results: pd.DataFrame = st.session_state["xleads_sync_results"]
-            success_count = int((results["sync_result"] == "SUCCESS").sum()) if not results.empty else 0
-            failure_count = int((results["sync_result"] == "FAILED").sum()) if not results.empty else 0
+            results = st.session_state["xleads_sync_results"]
+            success = int((results["sync_result"] == "SUCCESS").sum()) if not results.empty else 0
+            failed = int((results["sync_result"] == "FAILED").sum()) if not results.empty else 0
             left, right = st.columns(2)
-            left.metric("Successful updates", success_count)
-            right.metric("Failed updates", failure_count)
-            st.dataframe(results, use_container_width=True, hide_index=True)
+            left.metric("Successful", success)
+            right.metric("Failed", failed)
+            show_html(results, ["audit_id", "seller_name", "phone", "property_address", "sync_result", "contact_id", "error"])
             st.download_button(
                 "Download sync audit report",
                 results.to_csv(index=False).encode("utf-8"),
