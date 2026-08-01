@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -14,6 +15,7 @@ APP_TITLE = "War Room OS"
 MODULE_TITLE = "Seller Lead Command — Intelligence Layer"
 DEFAULT_TIMEZONE = "America/Chicago"
 PREVIEW_LIMIT = 100
+EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 def find_column(df: pd.DataFrame, options: list[str]) -> str | None:
@@ -36,6 +38,11 @@ def combine_address(street: str, city: str, state: str, postal: str) -> str:
     return ", ".join(part for part in parts if part and part.lower() not in {"none", "nan"})
 
 
+def normalize_email(value: object) -> str:
+    email = clean_text(value).lower()
+    return email if EMAIL_PATTERN.fullmatch(email) else ""
+
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     first = series_from(df, ["FirstName", "First Name", "first_name", "seller_first_name"])
@@ -54,7 +61,20 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["phone_1"] = series_from(df, ["phone_1", "Phone 1", "phone1", "Contact1Phone_1", "Contact1 Phone 1"])
     df["phone_2"] = series_from(df, ["phone_2", "Phone 2", "phone2", "Contact1Phone_2", "Contact1 Phone 2"])
     df["phone_3"] = series_from(df, ["phone_3", "Phone 3", "phone3", "Contact2Phone_1", "Contact2 Phone 1"])
-    df["email"] = series_from(df, ["email", "Email", "EmailAddress", "Email Address", "RecipientEmail", "OwnerEmail", "email_1", "Email 1"])
+
+    df["email_1"] = series_from(df, [
+        "Contact1Email_1", "Contact1Email1", "Contact1 Email 1",
+        "email", "Email", "EmailAddress", "Email Address", "RecipientEmail", "OwnerEmail", "email_1", "Email 1",
+    ]).map(normalize_email)
+    df["email_2"] = series_from(df, [
+        "Contact1Email_2", "Contact1Email2", "Contact1 Email 2", "email_2", "Email 2",
+    ]).map(normalize_email)
+    df["email_3"] = series_from(df, [
+        "Contact2Email_1", "Contact2Email1", "Contact2 Email 1", "email_3", "Email 3",
+    ]).map(normalize_email)
+    df["email"] = df["email_1"]
+    for backup_column in ("email_2", "email_3"):
+        df["email"] = df["email"].where(df["email"].str.strip().ne(""), df[backup_column])
 
     df["seller_message"] = series_from(df, ["seller_message", "message", "reply", "seller_reply", "last_message", "sms", "body", "Text", "Conversation", "Last Inbound Message"])
     df["call_transcript"] = series_from(df, ["call_transcript", "Call Transcript", "Transcript", "AI Call Transcript", "Voice Transcript", "Conversation Transcript"])
@@ -136,16 +156,24 @@ def show_table(df: pd.DataFrame, columns: list[str] | None = None, limit: int = 
 def preferred_columns(df: pd.DataFrame) -> list[str]:
     preferred = [
         "call_lane", "call_deadline", "lead_status", "lead_score", "opportunity_score_10", "confidence",
-        "seller_name", "phone", "phone_1", "phone_2", "property_address", "seller_message", "call_summary",
-        "timeline_bucket", "asking_price_extracted", "motivation", "missing_information",
+        "seller_name", "phone", "phone_1", "phone_2", "email", "email_2", "property_address", "mailing_address",
+        "seller_message", "call_summary", "timeline_bucket", "asking_price_extracted", "motivation", "missing_information",
         "recommended_next_question", "xleads_action", "rei_blackbook_tags", "risk_flags",
     ]
     return [column for column in preferred if column in df.columns]
 
 
+def email_queue_columns(df: pd.DataFrame) -> list[str]:
+    columns = [
+        "seller_name", "email", "email_2", "email_3", "phone", "property_address", "mailing_address",
+        "lead_status", "lead_score", "campaign_name", "source", "risk_flags", "duplicate_flag", "xleads_action",
+    ]
+    return [column for column in columns if column in df.columns]
+
+
 st.title(APP_TITLE)
 st.subheader(MODULE_TITLE)
-st.write("XLeads handles texting, AI voice calls, and workflows. This app ranks opportunities, protects missed leads, and creates the team's call and follow-up queues.")
+st.write("XLeads handles texting, AI voice calls, and workflows. This app ranks opportunities, protects missed leads, and creates the team's call, email, and follow-up queues.")
 
 with st.sidebar:
     st.header("Lead Intelligence Settings")
@@ -163,7 +191,7 @@ if uploaded_file is None:
     st.stop()
 
 try:
-    raw_df = pd.read_csv(uploaded_file)
+    raw_df = pd.read_csv(uploaded_file, low_memory=False)
 except Exception as exc:
     st.error(f"The CSV could not be read: {exc}")
     st.stop()
@@ -191,12 +219,20 @@ if "scored_df" not in st.session_state:
 
 scored_df = ensure_unique_columns(st.session_state["scored_df"])
 file_mode = st.session_state["file_mode"]
+valid_email = scored_df["email"].fillna("").astype(str).map(lambda value: bool(EMAIL_PATTERN.fullmatch(value.strip().lower())))
+email_ready = (
+    valid_email
+    & scored_df["duplicate_primary"].astype(bool)
+    & ~scored_df["opt_out_detected"].astype(bool)
+    & ~scored_df["call_lane"].isin(["Do Not Contact", "Duplicate / Suppress"])
+)
 
 if file_mode == "Seller Replies":
     metrics = [
         ("Total", len(scored_df)),
         ("Call Now", int((scored_df["call_lane"] == "Call Now").sum())),
         ("Call Today", int((scored_df["call_lane"] == "Call Today").sum())),
+        ("Email Ready", int(email_ready.sum())),
         ("Follow-Up", int(scored_df["call_lane"].isin(["Keep Qualifying", "Scheduled Follow-Up"]).sum())),
         ("Human Review", int((scored_df["call_lane"] == "Human Review").sum())),
         ("Blocked / Closed", int(scored_df["call_lane"].isin(["Do Not Contact", "Closed / No Call", "Duplicate / Suppress"]).sum())),
@@ -206,6 +242,7 @@ else:
         ("Total Raw Leads", len(scored_df)),
         ("Priority Campaign", int((scored_df["lead_status"] == "Priority Campaign Lead").sum())),
         ("Ready for Campaign", int((scored_df["lead_status"] == "Ready for Campaign").sum())),
+        ("Email Ready", int(email_ready.sum())),
         ("Needs Skip Trace", int((scored_df["lead_status"] == "Needs Phone / Skip Trace").sum())),
         ("Review", int(scored_df["human_review_required"].astype(bool).sum())),
     ]
@@ -213,7 +250,19 @@ else:
 for column, (label, value) in zip(st.columns(len(metrics)), metrics):
     column.metric(label, value)
 
-tabs = st.tabs(["Must Call Queue", "Missed Opportunities", "Follow-Up", "Compliance", "Skip Trace", "Campaign Queue", "All Leads", "Greatness Test"])
+st.download_button(
+    "Download Complete Processed Lead File",
+    scored_df.to_csv(index=False).encode("utf-8"),
+    "war_room_complete_processed_leads.csv",
+    "text/csv",
+    type="primary",
+    key="download_complete_processed_leads",
+)
+
+tabs = st.tabs([
+    "Must Call Queue", "Missed Opportunities", "Follow-Up", "Compliance", "Skip Trace",
+    "Campaign Queue", "Email Queue", "All Leads", "Greatness Test",
+])
 
 with tabs[0]:
     queue = scored_df[
@@ -235,6 +284,7 @@ with tabs[1]:
     ].copy()
     st.write("### Missed-Opportunity Watch")
     show_table(watch, preferred_columns(watch))
+    st.download_button("Download Missed Opportunities", watch.to_csv(index=False).encode("utf-8"), "war_room_missed_opportunities.csv", "text/csv")
 
 with tabs[2]:
     follow_up = scored_df[scored_df["call_lane"].isin(["Keep Qualifying", "Scheduled Follow-Up", "Human Review"])].copy()
@@ -243,9 +293,13 @@ with tabs[2]:
     st.download_button("Download Follow-Up Queue", follow_up.to_csv(index=False).encode("utf-8"), "war_room_follow_up_queue.csv", "text/csv")
 
 with tabs[3]:
-    compliance_columns = [column for column in ["seller_name", "phone", "property_address", "seller_message", "call_lane", "call_permission", "opt_out_detected", "wrong_number_detected", "duplicate_flag", "duplicate_primary", "risk_flags", "xleads_action"] if column in scored_df.columns]
-    st.write("### Compliance and Call Permissions")
+    compliance_columns = [column for column in [
+        "seller_name", "phone", "email", "property_address", "seller_message", "call_lane", "call_permission",
+        "opt_out_detected", "wrong_number_detected", "duplicate_flag", "duplicate_primary", "risk_flags", "xleads_action",
+    ] if column in scored_df.columns]
+    st.write("### Compliance and Contact Permissions")
     show_table(scored_df, compliance_columns)
+    st.download_button("Download Compliance Review", scored_df[compliance_columns].to_csv(index=False).encode("utf-8"), "war_room_compliance_review.csv", "text/csv")
 
 with tabs[4]:
     skiptrace = scored_df[(scored_df["xleads_action"].astype(str) == "SKIP_TRACE") & scored_df["duplicate_primary"].astype(bool)].copy()
@@ -264,11 +318,24 @@ with tabs[5]:
     st.download_button("Download XLeads Campaign Queue", campaign.to_csv(index=False).encode("utf-8"), "war_room_xleads_campaign_queue.csv", "text/csv")
 
 with tabs[6]:
+    email_queue = scored_df[email_ready].copy().sort_values(["lead_score", "confidence"], ascending=[False, False])
+    st.write("### Email Queue")
+    st.caption("This section prepares and downloads email-ready records only. It does not send email or start a workflow.")
+    show_table(email_queue, email_queue_columns(email_queue))
+    st.download_button(
+        "Download Email Queue",
+        email_queue.to_csv(index=False).encode("utf-8"),
+        "war_room_email_queue.csv",
+        "text/csv",
+        key="download_email_queue",
+    )
+
+with tabs[7]:
     st.write("### All Scored Leads")
     show_table(scored_df, limit=50)
     st.download_button("Download All Scored Leads", scored_df.to_csv(index=False).encode("utf-8"), "war_room_all_scored_leads.csv", "text/csv")
 
-with tabs[7]:
+with tabs[8]:
     st.write("### Built-In Greatness Test")
     if st.button("Run Greatness Test", key="greatness_test_tab"):
         test_df = run_greatness_test()
