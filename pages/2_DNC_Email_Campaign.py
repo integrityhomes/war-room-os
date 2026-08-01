@@ -93,11 +93,48 @@ with st.expander("TEAM INSTRUCTIONS — START HERE", expanded=True):
 with st.expander("WHAT EACH DOWNLOAD MEANS", expanded=False):
     st.markdown(
         """
-- **DNC Email Campaign CSV:** the narrow file for people whose phones are specifically on DNC hold and whose emails are still usable.
-- **All Cannot-Call Email Campaign CSV:** the broader file for every usable email where no phone is approved for calling.
-- **Email Suppression Audit:** people the bot removed from email because an email opt-out, unsubscribe, complaint, suppression, or bounce may exist. Review only—do not campaign.
+### All Cannot-Call Email Campaign CSV
 
-The download is flattened to **one row per email address**, so owners with multiple usable emails may appear on more than one row. Phone-number columns are intentionally removed.
+This is the **broadest usable-email list**. It includes every valid, non-suppressed email where the bot did not find a phone approved for calling or texting.
+
+It can include:
+
+- Confirmed phone DNC holds
+- Phones with blank or unclear DNC/litigator screening
+- Records with no valid phone number
+- Records where all returned phone numbers are unusable
+
+Use this file when the assignment is: **email everyone we cannot safely place in the phone/text campaign.**
+
+### DNC Email Campaign CSV
+
+This is a **narrower subset of the Cannot-Call Email file**. It includes only records where:
+
+- A phone number was found
+- The phone is marked DNC, litigator, or otherwise blocked from phone outreach
+- At least one valid email remains
+- No email opt-out or suppression flag was detected
+
+Use this file when the assignment is: **email only the people whose phones are confirmed DNC.**
+
+**Do not import both the Cannot-Call file and the DNC file into the same campaign.** The DNC records are already included inside the broader Cannot-Call file, so using both can create duplicate emails.
+
+### Email Suppression Audit
+
+This file is **not campaign-ready**. These records were removed because the data shows a possible:
+
+- Email unsubscribe
+- Email opt-out
+- Suppression flag
+- Bounce
+- Spam complaint
+- Invalid or questionable email status
+
+Use it only for review. **Never import the Email Suppression Audit into an email campaign.**
+
+### Important row-count rule
+
+The totals are **email rows, not necessarily unique owners or properties**. The campaign downloads are flattened to one row per usable email address. One owner with two valid email addresses can therefore appear twice.
         """
     )
 
@@ -140,6 +177,41 @@ metrics = st.columns(3)
 metrics[0].metric("Cannot-call email rows", len(cannot_call))
 metrics[1].metric("DNC email campaign rows", len(dnc_campaign))
 metrics[2].metric("Email suppression review", len(suppressed))
+
+other_cannot_call = max(len(cannot_call) - len(dnc_campaign), 0)
+with st.container(border=True):
+    st.subheader("What these three numbers mean")
+    st.markdown(
+        f"""
+### **{len(cannot_call):,} Cannot-Call Email rows**
+
+This is the **broadest usable-email list**. It contains everyone with a valid, non-suppressed email but no phone approved for calling or texting.
+
+It includes:
+
+- The **{len(dnc_campaign):,} confirmed DNC email rows** shown below
+- **{other_cannot_call:,} other cannot-call email rows** whose phones have unclear screening, no valid number, or another phone restriction
+
+Use this file when you want to email **everyone the bot cannot safely place into the phone/text campaign**.
+
+### **{len(dnc_campaign):,} DNC Email Campaign rows**
+
+This is a **subset of the {len(cannot_call):,} Cannot-Call rows**. These records specifically have a phone that is on DNC/litigator hold, plus at least one valid email that has no detected email suppression flag.
+
+Use this file when you want to email only this group: **we found their phone, but we cannot call or text it, so use email instead**.
+
+**Do not load both files into the same campaign.** The DNC rows are already included in the broader Cannot-Call file, so using both can email the same person twice.
+
+### **{len(suppressed):,} Email Suppression Review rows**
+
+These are **not campaign-ready**. They were excluded because the data shows a possible email opt-out, unsubscribe, bounce, complaint, suppression flag, or questionable email status.
+
+**Never import this file into an email campaign. It is for review only.**
+        """
+    )
+    st.info(
+        "These totals count email rows, not necessarily unique owners. One owner with two usable email addresses can appear on two rows."
+    )
 
 st.warning(
     "A phone DNC result does not automatically mean an email address is suppressed. "
